@@ -141,5 +141,3 @@ A formatted **4-page technical PDF guide** covering:
 ## 🛡️ Security & Privacy
 This repository contains **ZERO hardcoded API keys, tokens, or private credentials**. All authentication is managed via local environment variables. Never commit your `.env` file!
 
-## 📜 License
-MIT License. Open for educational and commercial use.
