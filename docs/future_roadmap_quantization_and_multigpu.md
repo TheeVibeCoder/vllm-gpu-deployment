@@ -95,9 +95,26 @@ PHASE 3: Large-Scale Distributed Multi-GPU Serving
 
 ---
 
+## 📌 Topic 4: The Internal Engine Mechanics — Scheduler (GPU Time) vs. KV Memory Manager (GPU Memory)
+
+### What We Will Study:
+1. **The Separation of Concerns**:
+   * **The Scheduler**: Manages **GPU TIME**. Decides *who* gets to run on Tensor Cores during this 15ms clock cycle (continuous iteration-level batching, request preemption, and queue priorities: Waiting vs. Running vs. Swapped).
+   * **The KV Memory Manager (`BlockManager`)**: Manages **GPU MEMORY**. Decides *where* tokens physically live in VRAM/CPU RAM (tracking free 16-token page pools, mapping the Block Table, reference counting for shared prefix caching, and orchestrating PCIe offload triggers).
+2. **The Handshake Protocol**:
+   * How the Scheduler asks the Memory Manager before every forward pass: *"Can you allocate blocks for this request batch?"* and adjusts batch sizes dynamically.
+
+### Action Item for Phase 4:
+* Inspect vLLM's `vllm/core/scheduler.py` and `vllm/core/block_manager_v1.py` source code to trace how requests transition between Waiting, Running, and Swapped queues during heavy loads.
+
+---
+
 ## 🗓️ Next Steps Checklist
 
 - [ ] **Step 1**: Study AWQ activation-aware quantization mechanics and compare against GPTQ/FP8.
 - [ ] **Step 2**: Test a 7B/8B AWQ model on our single Tesla T4.
 - [ ] **Step 3**: Benchmark Chunked Prefill on 1 GPU under concurrent load.
-- [ ] **Step 4**: Design and execute a 2-GPU Prefill-Decode disaggregation proof-of-concept.
+- [ ] **Step 4**: Study the internal handshake: Scheduler (GPU Time) vs. KV Memory Manager (GPU Memory).
+- [ ] **Step 5**: Design and execute a 2-GPU Prefill-Decode disaggregation proof-of-concept.
+- [ ] **Step 6**: Test multi-GPU distributed serving with Tensor Parallelism on larger models.
+
