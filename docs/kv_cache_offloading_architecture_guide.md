@@ -63,6 +63,55 @@ PHASE 2: Hybrid Tiered KV Cache Offloading (vLLM + LMCache)
 
 ---
 
+### Question 2.1: Is there dedicated memory space per user/question?
+**No, there is NO permanently reserved or dedicated space per user.**
+* **The Shared Memory Pool**: GPU VRAM is treated like a shared hotel pool with thousands of small 16-token rooms.
+* **Dynamic Checkout**: When a request arrives, vLLM dynamically checks out only the exact number of blocks needed for that specific prompt:
+  $$\text{Blocks Checked Out} = \lceil \frac{\text{Prompt Length}}{16} \rceil$$
+* **Multi-User Sharing**: When two users ask questions simultaneously, their blocks are interleaved anywhere in VRAM. When User A finishes, their blocks are instantly returned to the free pool for User B or User C to consume.
+
+---
+
+### Question 2.2: How do blocks stay connected when a 1,000-token question fills up? (The Block Table)
+If you ask a **1,000-token question**, it needs:
+$$\lceil \frac{1,000}{16} \rceil = 63 \text{ Blocks}$$
+Because GPU memory is heavily fragmented, these 63 blocks are scattered randomly across physical VRAM (e.g., Physical Block #14, #92, #5, #110...).
+
+**How they stay connected:**
+The engine maintains a **Block Table** (lookup index) for each active request:
+
+```text
+               YOUR 1,000-TOKEN QUERY
+┌─────────────────────────────────────────────────────────────┐
+│  Logical Sequence:                                          │
+│  Page 0 (Tokens 0-15)                                       │
+│  Page 1 (Tokens 16-31)                                      │
+│  ...                                                        │
+│  Page 62 (Tokens 992-1000)                                  │
+└──────────────────────────────┬──────────────────────────────┘
+                               │ Mapped via
+                               ▼
+┌─────────────────────────────────────────────────────────────┐
+│                 REQUEST'S BLOCK TABLE                       │
+│                                                             │
+│   Logical Page #      ──►      Physical GPU Block #         │
+│   ─────────────────────────────────────────────────         │
+│   Page 0              ──►      Physical Block #14           │
+│   Page 1              ──►      Physical Block #92           │
+│   Page 2              ──►      Physical Block #5            │
+│   ...                          ...                          │
+│   Page 62             ──►      Physical Block #8            │
+└─────────────────────────────────────────────────────────────┘
+```
+
+**Lifecycle as tokens generate (Decode Phase):**
+1. **Unfilled Slots**: Page 62 (Physical #8) holds tokens 992–1000 (8 tokens used, 8 empty slots remaining).
+2. **Filling Slots**: Generated tokens 1,001 through 1,008 fill those remaining 8 slots inside Physical Block #8. No new memory allocation is needed.
+3. **Crossing Block Boundary**: When Token 1,009 is generated, Physical #8 is 100% full. vLLM pulls **Physical Block #44** from the free pool and appends `Page 63 ──► Physical #44` to the Block Table.
+4. **Attention Execution**: The PagedAttention CUDA kernel reads the Block Table sequentially like a table of contents, gathering the scattered tensors on the fly without requiring contiguous VRAM.
+
+---
+
 ### Question 3: Do the pages contain the prefix cache tensors?
 **Yes.**
 * Each page contains the computed $K$ and $V$ projection matrices for its 16 tokens:
