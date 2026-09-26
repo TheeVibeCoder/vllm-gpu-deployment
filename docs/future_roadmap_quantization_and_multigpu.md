@@ -109,12 +109,29 @@ PHASE 3: Large-Scale Distributed Multi-GPU Serving
 
 ---
 
+## 📌 Topic 5: Continuous Batching (Iteration-Level Scheduling vs. Static Batching)
+
+### What We Will Study:
+1. **The Flaw of Static Batching**:
+   * Traditional deep learning waits for the *slowest* sequence in a batch to finish generating before releasing GPU compute (massive padding waste and GPU idle time).
+2. **How Continuous Batching Works (Orca / vLLM)**:
+   * **Iteration-Level Scheduling**: The batch is formed dynamically at *every single token step* (~15–20 ms intervals).
+   * **Dynamic Eviction & Injection**: As soon as Request A outputs `<|im_end|>`, it leaves the batch immediately, and Request C is pulled from the waiting queue into the vacant slot on the very next token iteration.
+   * **Combining Prefill & Decode**: How continuous batching interleaves new prefill requests alongside active token decoding without blocking.
+
+### Action Item for Phase 5:
+* Benchmark server throughput (tokens/sec) under 10 concurrent requests of wildly different lengths (e.g., 50 tokens vs. 800 tokens) to observe continuous batching in action.
+
+---
+
 ## 🗓️ Next Steps Checklist
 
 - [ ] **Step 1**: Study AWQ activation-aware quantization mechanics and compare against GPTQ/FP8.
 - [ ] **Step 2**: Test a 7B/8B AWQ model on our single Tesla T4.
 - [ ] **Step 3**: Benchmark Chunked Prefill on 1 GPU under concurrent load.
-- [ ] **Step 4**: Study the internal handshake: Scheduler (GPU Time) vs. KV Memory Manager (GPU Memory).
-- [ ] **Step 5**: Design and execute a 2-GPU Prefill-Decode disaggregation proof-of-concept.
-- [ ] **Step 6**: Test multi-GPU distributed serving with Tensor Parallelism on larger models.
+- [ ] **Step 4**: Study the internal engine handshake: Scheduler (GPU Time) vs. KV Memory Manager (GPU Memory).
+- [ ] **Step 5**: Deep dive into Continuous Batching (Iteration-Level scheduling vs. static batching).
+- [ ] **Step 6**: Design and execute a 2-GPU Prefill-Decode disaggregation proof-of-concept.
+- [ ] **Step 7**: Test multi-GPU distributed serving with Tensor Parallelism on larger models.
+
 
