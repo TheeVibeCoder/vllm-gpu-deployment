@@ -73,13 +73,21 @@ vllm-gpu-deployment/
 ├── .env.example                        # Safe template for cloud credentials (no keys committed!)
 ├── .gitignore                          # Protects keys, logs, and environments
 │
+├── configs/
+│   └── lmcache.yaml                    # LMCache 3-tier offloading config (CPU RAM + NVMe)
+│
 ├── scripts/
 │   ├── manage_lightning.py             # Local CLI: Start, stop, or check cloud GPU from Mac
 │   ├── setup_gpu.sh                    # 1-Click setup: Installs vLLM & fixes NumPy on ANY cloud GPU
 │   ├── launch_vllm.sh                  # Universal command: 32K context + Hermes tool parser
-│   └── test_client.py                  # Test client to verify chat & tool completions
+│   ├── launch_vllm_lmcache.sh          # Native LMCacheConnectorV1 multi-tier launcher
+│   ├── test_client.py                  # Test client to verify chat & tool completions
+│   ├── test_prefix_caching.py          # Native prefix caching benchmark
+│   └── benchmark_hybrid_cache.py       # Automated Cold vs Warm TTFT evaluation
 │
 └── docs/
+    ├── kv_cache_offloading_architecture_guide.md # Deep-dive KV offload & PagedAttention guide
+    ├── kv_cache_offload_simulator.html # Interactive 3-Tier KV cache simulator
     ├── vllm_cloud_benchmark_guide.md   # Deep-dive engineering guide
     └── LLM_Inference_and_vLLM_Systems_Guide.pdf # 4-page publication-grade PDF cheat sheet
 ```
@@ -138,6 +146,66 @@ A formatted **4-page technical PDF guide** covering:
 
 ---
 
+## ⚡ Next Level: KV Cache Offloading & Multi-Tier Hierarchy (LMCache + vLLM)
+
+Beyond basic deployment, we explored scaling context retention and reducing Time to First Token (TTFT) by moving beyond single-tier GPU VRAM into **hybrid tiered memory architectures**.
+
+### Architecture: Native Prefix Caching vs. Multi-Tier Offloading
+
+```text
+Option A: Native Prefix Caching (vLLM Only)
+┌────────────────────────────────────────────────────────┐
+│  Tier 1: GPU VRAM (Tesla T4)                           │
+│  • PagedAttention (16-token pages, ~195 KB each)       │
+│  • Radix Tree token prefix hash                        │
+│  ⚠️ Evicted by GPU? DELETED PERMANENTLY.               │
+└────────────────────────────────────────────────────────┘
+
+Option B: Hybrid Tiered Offloading (vLLM + LMCache)
+┌────────────────────────────────────────────────────────┐
+│  Tier 1: GPU VRAM (Tesla T4)                           │
+│  • Active tensor execution (~900 GB/s)                 │
+└───────────────────────────┬────────────────────────────┘
+                            │ PCIe DMA (~16 GB/s, Zero-Copy)
+┌───────────────────────────▼────────────────────────────┐
+│  Tier 2: Host CPU RAM (LMCache LocalCPUBackend)        │
+│  • 5.0 GB pinned memory pool                           │
+│  • Onload in ~10 ms (bypasses full prefill math!)      │
+└───────────────────────────┬────────────────────────────┘
+                            │ NVMe Interface (~3.5 GB/s)
+┌───────────────────────────▼────────────────────────────┐
+│  Tier 3: Local NVMe SSD (LMCache LocalDiskBackend)     │
+│  • 10.0 GB persistent storage                          │
+│  • Preserves context across server restarts            │
+└────────────────────────────────────────────────────────┘
+```
+
+### Empirical Benchmarks Comparison (Tesla T4)
+
+| Metric | Option A: Native Prefix Cache | Option B: vLLM + LMCache Hybrid |
+| :--- | :--- | :--- |
+| **Cold TTFT (Turn 1)** | 1,007 ms | 1,426 ms |
+| **Warm TTFT (Turn 2)** | **456 ms** | **667 ms** |
+| **Latency Reduction** | **54.7% faster** | **53.2% faster** |
+| **Prefix Cache Hit Rate** | 49.7% | 63.4% |
+| **Behavior on GPU Eviction** | **Data is lost forever.** Recompute required. | **Saved to CPU/SSD.** Restored in ~10 ms. |
+| **Total Cache Pool** | ~7.0 GB | **~22.0 GB** (7GB VRAM + 5GB RAM + 10GB Disk) |
+
+### Key Architectural Learnings
+1. **PagedAttention is the enabler**: Memory is split into discrete 16-token pages (~195 KB). This paging enables offloading individual cold pages over PCIe without having to copy entire monolithic tensors.
+2. **Native Upstream Connector**: While `lmcache_vllm` CLI wrapper broke due to vLLM 0.29.0 multimodal refactors, vLLM 0.29.0 natively includes `LMCacheConnectorV1` inside `vllm/distributed/kv_transfer/kv_connector/v1/factory.py`.
+3. **PCIe vs. Industry Alternatives**:
+   * **Tesla T4 PCIe Gen3 x16**: ~16 GB/s transfer via pinned memory DMA (~0.2 ms per 3MB chunk).
+   * **Apple Silicon (MLX)**: Unified Memory Architecture (UMA) with shared physical pool up to 800 GB/s (True zero-copy).
+   * **NVIDIA GH200 / NVLink-C2C**: 900 GB/s bidirectional interconnect.
+   * **PD Disaggregation**: Prefill and Decode disaggregated across InfiniBand/RoCE (Mooncake).
+
+👉 Full technical breakdown: [`docs/kv_cache_offloading_architecture_guide.md`](docs/kv_cache_offloading_architecture_guide.md)  
+👉 Interactive visual simulator: [`docs/kv_cache_offload_simulator.html`](docs/kv_cache_offload_simulator.html)
+
+---
+
 ## 🛡️ Security & Privacy
 This repository contains **ZERO hardcoded API keys, tokens, or private credentials**. All authentication is managed via local environment variables. Never commit your `.env` file!
+
 
