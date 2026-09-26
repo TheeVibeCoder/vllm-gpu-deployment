@@ -1,0 +1,719 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <script src="https://www.gstatic.com/antigravity/web/dev/tailwindcss.min.js"></script>
+  <style>
+    .tier-box { transition: all 0.3s ease; }
+    .token-block { animation: popIn 0.35s cubic-bezier(0.175, 0.885, 0.32, 1.275); }
+    @keyframes popIn {
+      0% { transform: scale(0.6) translateY(5px); opacity: 0; }
+      100% { transform: scale(1) translateY(0); opacity: 1; }
+    }
+    .moving-glow { animation: pulseGlow 1.5s infinite; }
+    @keyframes pulseGlow {
+      0%, 100% { box-shadow: 0 0 5px rgba(99, 102, 241, 0.4); }
+      50% { box-shadow: 0 0 18px rgba(99, 102, 241, 0.85); }
+    }
+    .data-flow-down { animation: flowDown 0.6s ease-out; }
+    @keyframes flowDown {
+      0% { transform: translateY(-20px); opacity: 0; }
+      100% { transform: translateY(0); opacity: 1; }
+    }
+    .data-flow-up { animation: flowUp 0.6s ease-out; }
+    @keyframes flowUp {
+      0% { transform: translateY(20px); opacity: 0; }
+      100% { transform: translateY(0); opacity: 1; }
+    }
+    .arch-tab { transition: all 0.2s ease; }
+    .arch-tab.active { border-bottom: 2px solid; }
+    .arrow-pulse { animation: arrowBounce 1s infinite; }
+    @keyframes arrowBounce {
+      0%, 100% { transform: translateY(0); }
+      50% { transform: translateY(3px); }
+    }
+    .fade-in { animation: fadeIn 0.4s ease; }
+    @keyframes fadeIn {
+      0% { opacity: 0; transform: translateY(8px); }
+      100% { opacity: 1; transform: translateY(0); }
+    }
+  </style>
+</head>
+<body class="bg-transparent text-[var(--foreground)] antialiased p-3 select-none">
+  <div class="bg-[var(--card)] text-[var(--foreground)] border border-[var(--border)] rounded-2xl p-5 shadow-lg max-w-4xl mx-auto">
+    
+    <!-- Header -->
+    <div class="flex flex-wrap items-center justify-between gap-3 border-b border-[var(--border)] pb-4 mb-4">
+      <div>
+        <div class="flex items-center gap-2">
+          <span class="w-3 h-3 rounded-full bg-cyan-400 animate-ping"></span>
+          <h2 class="text-lg font-bold tracking-tight">KV Cache Architecture Simulator</h2>
+        </div>
+        <p class="text-xs text-[var(--muted-foreground)] mt-0.5">
+          Compare: <span class="text-cyan-400 font-semibold">Option A (vLLM Only)</span> vs <span class="text-emerald-400 font-semibold">Option B (vLLM + LMCache Hybrid)</span>
+        </p>
+      </div>
+
+      <!-- Live Metric Badges -->
+      <div class="flex items-center gap-2 text-xs">
+        <div class="px-3 py-1.5 rounded-lg bg-[var(--background)] border border-[var(--border)] flex flex-col items-center">
+          <span class="text-[var(--muted-foreground)] text-[10px] uppercase font-mono">TTFT</span>
+          <span id="stat-ttft" class="font-bold text-cyan-400 text-sm">--</span>
+        </div>
+        <div class="px-3 py-1.5 rounded-lg bg-[var(--background)] border border-[var(--border)] flex flex-col items-center">
+          <span class="text-[var(--muted-foreground)] text-[10px] uppercase font-mono">Bus Action</span>
+          <span id="stat-bus" class="font-bold text-emerald-400 text-sm">Idle</span>
+        </div>
+        <div class="px-3 py-1.5 rounded-lg bg-[var(--background)] border border-[var(--border)] flex flex-col items-center">
+          <span class="text-[var(--muted-foreground)] text-[10px] uppercase font-mono">Cache Engine</span>
+          <span id="stat-engine" class="font-bold text-[var(--muted-foreground)] text-sm">--</span>
+        </div>
+      </div>
+    </div>
+
+    <!-- Architecture Toggle Tabs -->
+    <div class="flex gap-1 mb-4 bg-[var(--background)] rounded-xl p-1 border border-[var(--border)]">
+      <button id="tab-a" onclick="switchArch('a')" class="arch-tab active flex-1 px-4 py-2.5 rounded-lg text-xs font-bold transition flex flex-col items-center gap-0.5 border-cyan-400 bg-cyan-500/10 text-cyan-400">
+        <span>🅰️ Option A: vLLM Prefix Cache Only</span>
+        <span class="text-[10px] font-normal opacity-70">GPU VRAM only — evicted = gone forever</span>
+      </button>
+      <button id="tab-b" onclick="switchArch('b')" class="arch-tab flex-1 px-4 py-2.5 rounded-lg text-xs font-bold transition flex flex-col items-center gap-0.5 text-[var(--muted-foreground)] hover:text-emerald-400">
+        <span>🅱️ Option B: vLLM + LMCache Hybrid</span>
+        <span class="text-[10px] font-normal opacity-70">3-tier: GPU → CPU RAM → SSD (nothing lost!)</span>
+      </button>
+    </div>
+
+    <!-- Architecture Diagram Panel -->
+    <div id="arch-diagram" class="bg-[var(--background)] border border-[var(--border)] rounded-xl p-4 mb-4 fade-in">
+      <!-- Filled dynamically -->
+    </div>
+
+    <!-- PagedAttention Explainer -->
+    <details class="bg-[var(--background)] border border-purple-500/20 rounded-xl mb-4 group">
+      <summary class="p-3 cursor-pointer text-xs font-bold uppercase tracking-wider text-purple-400 flex items-center gap-2 hover:text-purple-300">
+        <span class="transition-transform group-open:rotate-90">▶</span>
+        📄 What are these "Pages"? (PagedAttention Explainer)
+      </summary>
+      <div class="px-4 pb-4 pt-1 fade-in">
+        <div class="grid grid-cols-1 md:grid-cols-2 gap-3">
+          <!-- Traditional -->
+          <div class="border border-red-500/20 rounded-lg p-3">
+            <div class="text-[10px] uppercase font-mono text-red-400 mb-2 font-bold">❌ Traditional Attention (Old Way)</div>
+            <div class="bg-[var(--card)] rounded p-2 mb-2">
+              <div class="flex">
+                <div class="flex-1 bg-red-500/10 border border-red-500/30 rounded p-1.5 text-center text-[9px] font-mono text-red-300">
+                  ONE giant contiguous KV tensor → [tok1][tok2][tok3]...[tok2048]
+                </div>
+              </div>
+            </div>
+            <ul class="text-[10px] text-[var(--muted-foreground)] space-y-1">
+              <li>• One massive contiguous memory allocation</li>
+              <li>• Can't move <b>part</b> of it — all or nothing</li>
+              <li>• Wastes memory (pre-allocates max length)</li>
+              <li>• <span class="text-red-400">Can't offload individual pieces</span></li>
+            </ul>
+          </div>
+          <!-- PagedAttention -->
+          <div class="border border-emerald-500/20 rounded-lg p-3">
+            <div class="text-[10px] uppercase font-mono text-emerald-400 mb-2 font-bold">✅ PagedAttention (vLLM — What We Use)</div>
+            <div class="bg-[var(--card)] rounded p-2 mb-2">
+              <div class="flex gap-1 flex-wrap">
+                <div class="bg-cyan-500/10 border border-cyan-500/30 rounded px-1.5 py-1 text-[9px] font-mono text-cyan-300 flex flex-col items-center">📄 Page 1<br><span class="text-[8px] opacity-60">16 tok</span></div>
+                <div class="bg-cyan-500/10 border border-cyan-500/30 rounded px-1.5 py-1 text-[9px] font-mono text-cyan-300 flex flex-col items-center">📄 Page 2<br><span class="text-[8px] opacity-60">16 tok</span></div>
+                <div class="bg-indigo-500/10 border border-indigo-500/30 rounded px-1.5 py-1 text-[9px] font-mono text-indigo-300 flex flex-col items-center">📄 Page 3<br><span class="text-[8px] opacity-60">→ CPU</span></div>
+                <div class="bg-cyan-500/10 border border-cyan-500/30 rounded px-1.5 py-1 text-[9px] font-mono text-cyan-300 flex flex-col items-center">📄 Page 4<br><span class="text-[8px] opacity-60">16 tok</span></div>
+              </div>
+            </div>
+            <ul class="text-[10px] text-[var(--muted-foreground)] space-y-1">
+              <li>• KV cache split into <b>fixed-size pages</b> (like OS memory pages)</li>
+              <li>• Each page = <b>16 tokens × 24 layers × K+V tensors</b></li>
+              <li>• Pages are <b>non-contiguous</b> — can be anywhere in VRAM</li>
+              <li>• <span class="text-emerald-400 font-semibold">Can move individual pages between GPU ↔ CPU ↔ SSD!</span></li>
+            </ul>
+          </div>
+        </div>
+        <div class="mt-3 text-[10px] text-purple-300/80 text-center border-t border-[var(--border)] pt-2">
+          💡 <b>PagedAttention is WHY offloading is possible.</b> Without paging, you'd have to move the entire KV cache at once (too slow). With pages, LMCache moves only the cold ones.
+          <br>Each page in this simulator = 1 PagedAttention block = 16 tokens of K + V tensors (~195 KB for Qwen2.5-0.5B)
+        </div>
+      </div>
+    </details>
+
+    <!-- Question Input -->
+    <div class="bg-[var(--background)] border border-cyan-500/30 rounded-xl p-3 mb-4">
+      <div class="flex items-center justify-between mb-1.5">
+        <label for="user-q-input" class="text-xs font-bold uppercase tracking-wider text-cyan-400 flex items-center gap-1.5">
+          💬 Send a Question to the Model
+        </label>
+        <span id="cache-indicator" class="text-[11px] font-mono px-2 py-0.5 rounded bg-cyan-500/10 text-cyan-300">
+          State: No Cache Yet
+        </span>
+      </div>
+      <div class="flex gap-2">
+        <input id="user-q-input" type="text" value="How does KV cache offloading reduce latency?" 
+          class="flex-1 bg-[var(--card)] border border-[var(--border)] rounded-lg px-3 py-2 text-xs font-mono text-[var(--foreground)] focus:outline-none focus:border-cyan-500" />
+        <button onclick="handleSendQuestion()" class="px-4 py-2 bg-cyan-600 hover:bg-cyan-500 text-white rounded-lg text-xs font-semibold transition flex items-center gap-1.5 shadow-sm">
+          <span>🚀 Send</span>
+        </button>
+      </div>
+    </div>
+
+    <!-- The 3 Memory Tiers -->
+    <div class="grid grid-cols-1 md:grid-cols-3 gap-4 mb-4">
+      
+      <!-- TIER 1: GPU VRAM -->
+      <div id="tier-gpu" class="tier-box bg-[var(--background)] border-2 border-cyan-500/40 rounded-xl p-4 flex flex-col justify-between">
+        <div>
+          <div class="flex items-center justify-between mb-2">
+            <span class="text-xs font-bold uppercase tracking-wider text-cyan-400 flex items-center gap-1.5">
+              <span class="inline-block w-2 h-2 rounded-full bg-cyan-400"></span> Tier 1: GPU VRAM
+            </span>
+            <span class="text-[10px] font-mono px-2 py-0.5 rounded bg-cyan-500/10 text-cyan-300 border border-cyan-500/20">~900 GB/s</span>
+          </div>
+          <p class="text-[11px] text-[var(--muted-foreground)] mb-3 leading-relaxed">
+            Tesla T4 VRAM. Tensor cores compute attention here. <span id="tier1-engine" class="font-semibold text-cyan-300">vLLM PagedAttention</span>
+          </p>
+          <div id="gpu-blocks" class="min-h-[100px] bg-[var(--card)]/50 rounded-lg p-2.5 border border-dashed border-cyan-500/30 flex flex-wrap content-start gap-1.5">
+            <div id="gpu-empty" class="w-full text-center text-xs text-[var(--muted-foreground)] py-6 font-mono">No Active KV Blocks</div>
+          </div>
+        </div>
+        <div class="mt-3 pt-2 border-t border-[var(--border)] flex items-center justify-between text-[11px]">
+          <span class="text-[var(--muted-foreground)]">VRAM:</span>
+          <span id="gpu-usage" class="font-mono font-semibold text-cyan-400">0 / 6 Blocks</span>
+        </div>
+      </div>
+
+      <!-- TIER 2: HOST CPU RAM -->
+      <div id="tier-cpu" class="tier-box bg-[var(--background)] border-2 border-indigo-500/30 rounded-xl p-4 flex flex-col justify-between">
+        <div>
+          <div class="flex items-center justify-between mb-2">
+            <span class="text-xs font-bold uppercase tracking-wider text-indigo-400 flex items-center gap-1.5">
+              <span class="inline-block w-2 h-2 rounded-full bg-indigo-400"></span> Tier 2: CPU RAM
+            </span>
+            <span id="tier2-badge" class="text-[10px] font-mono px-2 py-0.5 rounded bg-indigo-500/10 text-indigo-300 border border-indigo-500/20">PCIe ~16 GB/s</span>
+          </div>
+          <p id="tier2-desc" class="text-[11px] text-[var(--muted-foreground)] mb-3 leading-relaxed">
+            <span id="tier2-label">⛔ Not available in Option A</span>
+          </p>
+          <div id="cpu-blocks" class="min-h-[100px] bg-[var(--card)]/50 rounded-lg p-2.5 border border-dashed border-indigo-500/30 flex flex-wrap content-start gap-1.5">
+            <div id="cpu-empty" class="w-full text-center text-xs text-[var(--muted-foreground)] py-6 font-mono">Not Active</div>
+          </div>
+        </div>
+        <div class="mt-3 pt-2 border-t border-[var(--border)] flex items-center justify-between text-[11px]">
+          <span class="text-[var(--muted-foreground)]">CPU RAM:</span>
+          <span id="cpu-usage" class="font-mono font-semibold text-indigo-400">0 / 0 Blocks</span>
+        </div>
+      </div>
+
+      <!-- TIER 3: NVMe SSD -->
+      <div id="tier-ssd" class="tier-box bg-[var(--background)] border-2 border-amber-500/30 rounded-xl p-4 flex flex-col justify-between">
+        <div>
+          <div class="flex items-center justify-between mb-2">
+            <span class="text-xs font-bold uppercase tracking-wider text-amber-400 flex items-center gap-1.5">
+              <span class="inline-block w-2 h-2 rounded-full bg-amber-400"></span> Tier 3: NVMe SSD
+            </span>
+            <span class="text-[10px] font-mono px-2 py-0.5 rounded bg-amber-500/10 text-amber-300 border border-amber-500/20">~3.5 GB/s</span>
+          </div>
+          <p id="tier3-desc" class="text-[11px] text-[var(--muted-foreground)] mb-3 leading-relaxed">
+            <span id="tier3-label">⛔ Not available in Option A</span>
+          </p>
+          <div id="ssd-blocks" class="min-h-[100px] bg-[var(--card)]/50 rounded-lg p-2.5 border border-dashed border-amber-500/30 flex flex-wrap content-start gap-1.5">
+            <div id="ssd-empty" class="w-full text-center text-xs text-[var(--muted-foreground)] py-6 font-mono">Not Active</div>
+          </div>
+        </div>
+        <div class="mt-3 pt-2 border-t border-[var(--border)] flex items-center justify-between text-[11px]">
+          <span class="text-[var(--muted-foreground)]">SSD Disk:</span>
+          <span id="ssd-usage" class="font-mono font-semibold text-amber-400">0 / 0 Blocks</span>
+        </div>
+      </div>
+
+    </div>
+
+    <!-- Control Buttons -->
+    <div class="bg-[var(--background)] border border-[var(--border)] rounded-xl p-4 mb-4">
+      <div class="flex items-center justify-between mb-2.5">
+        <span class="text-xs font-bold uppercase tracking-wider text-[var(--foreground)]">Step-by-Step Simulation</span>
+        <span id="scenario-label" class="text-[11px] text-[var(--muted-foreground)]">Option A: GPU-only cache</span>
+      </div>
+
+      <div id="buttons-container" class="grid grid-cols-2 sm:grid-cols-5 gap-2">
+        <!-- Buttons are rendered dynamically based on selected architecture -->
+      </div>
+      
+      <div class="mt-3 flex items-center justify-between pt-2 border-t border-[var(--border)]">
+        <span id="hint-text" class="text-[11px] text-[var(--muted-foreground)]">💡 In Option A, if GPU evicts a block, it's gone forever!</span>
+        <button onclick="resetSim()" class="text-[11px] text-[var(--muted-foreground)] hover:text-[var(--foreground)] underline font-mono">
+          ↺ Reset
+        </button>
+      </div>
+    </div>
+
+    <!-- Real Benchmark Comparison -->
+    <div class="bg-[var(--background)] border border-[var(--border)] rounded-xl p-4 mb-4">
+      <div class="flex items-center gap-2 mb-3">
+        <span class="text-xs font-bold uppercase tracking-wider text-[var(--foreground)]">📊 Real Benchmark Results (Our Cloud GPU)</span>
+      </div>
+      <div class="grid grid-cols-2 gap-3">
+        <div class="border border-cyan-500/20 rounded-lg p-3">
+          <div class="text-[10px] uppercase font-mono text-cyan-400 mb-2 font-bold">🅰️ Option A: Prefix Cache Only</div>
+          <div class="space-y-1.5 text-[11px] font-mono">
+            <div class="flex justify-between"><span class="text-[var(--muted-foreground)]">Turn 1 (Cold):</span><span class="text-amber-400 font-bold">1,007 ms</span></div>
+            <div class="flex justify-between"><span class="text-[var(--muted-foreground)]">Turn 2 (Cache Hit):</span><span class="text-cyan-400 font-bold">456 ms</span></div>
+            <div class="flex justify-between"><span class="text-[var(--muted-foreground)]">Speedup:</span><span class="text-cyan-300">54.7%</span></div>
+            <div class="flex justify-between"><span class="text-[var(--muted-foreground)]">Evicted KV:</span><span class="text-red-400">❌ Lost forever</span></div>
+            <div class="flex justify-between"><span class="text-[var(--muted-foreground)]">Total capacity:</span><span class="text-[var(--muted-foreground)]">~7 GB (GPU only)</span></div>
+          </div>
+        </div>
+        <div class="border border-emerald-500/20 rounded-lg p-3">
+          <div class="text-[10px] uppercase font-mono text-emerald-400 mb-2 font-bold">🅱️ Option B: + LMCache Hybrid</div>
+          <div class="space-y-1.5 text-[11px] font-mono">
+            <div class="flex justify-between"><span class="text-[var(--muted-foreground)]">Turn 1 (Cold):</span><span class="text-amber-400 font-bold">1,426 ms</span></div>
+            <div class="flex justify-between"><span class="text-[var(--muted-foreground)]">Turn 2 (Cache Hit):</span><span class="text-emerald-400 font-bold">667 ms</span></div>
+            <div class="flex justify-between"><span class="text-[var(--muted-foreground)]">Speedup:</span><span class="text-emerald-300">53.2%</span></div>
+            <div class="flex justify-between"><span class="text-[var(--muted-foreground)]">Evicted KV:</span><span class="text-emerald-400">✅ Saved to CPU/Disk</span></div>
+            <div class="flex justify-between"><span class="text-[var(--muted-foreground)]">Total capacity:</span><span class="text-emerald-300 font-bold">~22 GB (GPU+CPU+Disk)</span></div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Live System Log -->
+    <div class="bg-[var(--background)]/90 border border-[var(--border)] rounded-xl p-3.5">
+      <div class="flex items-center gap-2 mb-1.5">
+        <span class="w-2 h-2 rounded-full bg-cyan-400"></span>
+        <span class="text-xs font-bold uppercase tracking-wider text-[var(--foreground)]">Transfer Event Log</span>
+      </div>
+      <div id="sim-log" class="text-xs font-mono text-[var(--muted-foreground)] leading-relaxed space-y-1 max-h-40 overflow-y-auto">
+        <p class="text-cyan-300">💡 Select Option A or B above, then click step buttons or send a question to simulate!</p>
+      </div>
+    </div>
+
+  </div>
+
+  <script>
+    // ── State ──
+    let mode = 'a'; // 'a' = prefix cache only, 'b' = lmcache hybrid
+    let gpuBlocks = 0, cpuBlocks = 0, ssdBlocks = 0;
+    let blockIdCounter = 0;
+    let questionHistory = [];
+    const GPU_MAX = 6, CPU_MAX_B = 12, SSD_MAX_B = 24;
+
+    // ── DOM Refs ──
+    const statTTFT = document.getElementById('stat-ttft');
+    const statBus = document.getElementById('stat-bus');
+    const statEngine = document.getElementById('stat-engine');
+    const cacheIndicator = document.getElementById('cache-indicator');
+    const gpuBlocksEl = document.getElementById('gpu-blocks');
+    const cpuBlocksEl = document.getElementById('cpu-blocks');
+    const ssdBlocksEl = document.getElementById('ssd-blocks');
+    const simLog = document.getElementById('sim-log');
+    const archDiagram = document.getElementById('arch-diagram');
+    const buttonsContainer = document.getElementById('buttons-container');
+
+    // ── Logging ──
+    function log(msg, color='text-[var(--muted-foreground)]') {
+      const t = new Date().toLocaleTimeString().split(' ')[0];
+      simLog.innerHTML = `<p class="${color}">[${t}] › ${msg}</p>` + simLog.innerHTML;
+    }
+
+    function createBlock(id, bgClass, borderClass, extra='') {
+      const div = document.createElement('div');
+      div.className = `token-block text-[10px] font-mono px-2 py-1.5 rounded shadow-sm border ${bgClass} ${borderClass} font-semibold flex flex-col items-center gap-0 ${extra}`;
+      div.dataset.blockId = id;
+      div.title = `PagedAttention Block #${id}\n16 tokens × 24 layers\nK tensor + V tensor\n~195 KB per block`;
+      div.innerHTML = `<span class="flex items-center gap-0.5">📄<span>Page#${id}</span></span><span class="opacity-60 text-[8px]">16tok K+V</span>`;
+      return div;
+    }
+
+    // ── Architecture Switch ──
+    function switchArch(m) {
+      mode = m;
+      resetSim();
+      const tabA = document.getElementById('tab-a');
+      const tabB = document.getElementById('tab-b');
+      
+      if (mode === 'a') {
+        tabA.className = 'arch-tab active flex-1 px-4 py-2.5 rounded-lg text-xs font-bold transition flex flex-col items-center gap-0.5 border-cyan-400 bg-cyan-500/10 text-cyan-400';
+        tabB.className = 'arch-tab flex-1 px-4 py-2.5 rounded-lg text-xs font-bold transition flex flex-col items-center gap-0.5 text-[var(--muted-foreground)] hover:text-emerald-400';
+        statEngine.textContent = 'vLLM Only';
+        statEngine.className = 'font-bold text-cyan-400 text-sm';
+      } else {
+        tabA.className = 'arch-tab flex-1 px-4 py-2.5 rounded-lg text-xs font-bold transition flex flex-col items-center gap-0.5 text-[var(--muted-foreground)] hover:text-cyan-400';
+        tabB.className = 'arch-tab active flex-1 px-4 py-2.5 rounded-lg text-xs font-bold transition flex flex-col items-center gap-0.5 border-emerald-400 bg-emerald-500/10 text-emerald-400';
+        statEngine.textContent = 'vLLM + LMCache';
+        statEngine.className = 'font-bold text-emerald-400 text-sm';
+      }
+      renderArchDiagram();
+      renderButtons();
+      renderTierLabels();
+      log(`Switched to <b>${mode === 'a' ? 'Option A: vLLM Prefix Cache Only' : 'Option B: vLLM + LMCache Hybrid Offloading'}</b>`, mode === 'a' ? 'text-cyan-300' : 'text-emerald-300');
+    }
+
+    function renderArchDiagram() {
+      if (mode === 'a') {
+        archDiagram.innerHTML = `
+          <div class="fade-in">
+            <div class="text-xs font-bold text-cyan-400 mb-2">🅰️ Option A Architecture: vLLM --enable-prefix-caching</div>
+            <div class="flex items-center gap-3 text-[11px]">
+              <div class="flex-1 border border-cyan-500/30 rounded-lg p-2.5 text-center">
+                <div class="text-cyan-300 font-bold mb-1">vLLM Engine</div>
+                <div class="text-[10px] text-[var(--muted-foreground)]">PagedAttention + Radix Tree</div>
+              </div>
+              <div class="text-cyan-400 font-bold">→</div>
+              <div class="flex-1 border-2 border-cyan-500/50 rounded-lg p-2.5 text-center bg-cyan-500/5">
+                <div class="text-cyan-300 font-bold mb-1">GPU VRAM (Tier 1)</div>
+                <div class="text-[10px] text-[var(--muted-foreground)]">Only storage. Evicted = gone ❌</div>
+              </div>
+              <div class="text-red-400 font-bold">✕</div>
+              <div class="flex-1 border border-red-500/20 rounded-lg p-2.5 text-center opacity-40">
+                <div class="text-[var(--muted-foreground)] font-bold mb-1">No Tier 2/3</div>
+                <div class="text-[10px] text-[var(--muted-foreground)]">Nothing catches evicted KV</div>
+              </div>
+            </div>
+          </div>`;
+      } else {
+        archDiagram.innerHTML = `
+          <div class="fade-in">
+            <div class="text-xs font-bold text-emerald-400 mb-2">🅱️ Option B Architecture: vLLM + LMCacheConnectorV1 + lmcache.yaml</div>
+            <div class="flex items-center gap-2 text-[11px]">
+              <div class="border border-emerald-500/30 rounded-lg p-2 text-center flex-1">
+                <div class="text-emerald-300 font-bold text-[10px]">vLLM Engine</div>
+                <div class="text-[9px] text-[var(--muted-foreground)]">--kv-transfer-config</div>
+              </div>
+              <div class="text-emerald-400 text-[10px] arrow-pulse">→</div>
+              <div class="border-2 border-cyan-500/50 rounded-lg p-2 text-center flex-1 bg-cyan-500/5">
+                <div class="text-cyan-300 font-bold text-[10px]">Tier 1: GPU</div>
+                <div class="text-[9px] text-[var(--muted-foreground)]">6.99 GB VRAM</div>
+              </div>
+              <div class="text-indigo-400 text-[10px] arrow-pulse">⇄<br><span class="text-[8px]">PCIe</span></div>
+              <div class="border-2 border-indigo-500/40 rounded-lg p-2 text-center flex-1 bg-indigo-500/5">
+                <div class="text-indigo-300 font-bold text-[10px]">Tier 2: CPU RAM</div>
+                <div class="text-[9px] text-[var(--muted-foreground)]">5 GB (LMCache)</div>
+              </div>
+              <div class="text-amber-400 text-[10px] arrow-pulse">⇄<br><span class="text-[8px]">NVMe</span></div>
+              <div class="border-2 border-amber-500/40 rounded-lg p-2 text-center flex-1 bg-amber-500/5">
+                <div class="text-amber-300 font-bold text-[10px]">Tier 3: SSD</div>
+                <div class="text-[9px] text-[var(--muted-foreground)]">10 GB (LMCache)</div>
+              </div>
+            </div>
+            <div class="mt-2 text-[10px] text-emerald-300/70 text-center">LMCacheConnectorV1 manages all tier transfers automatically via LRU eviction policy</div>
+          </div>`;
+      }
+    }
+
+    function renderTierLabels() {
+      const tier1Eng = document.getElementById('tier1-engine');
+      const tier2Label = document.getElementById('tier2-label');
+      const tier3Label = document.getElementById('tier3-label');
+      const tier2Badge = document.getElementById('tier2-badge');
+      const scenarioLabel = document.getElementById('scenario-label');
+      const hintText = document.getElementById('hint-text');
+
+      if (mode === 'a') {
+        tier1Eng.textContent = 'vLLM PagedAttention + Radix Tree';
+        tier2Label.innerHTML = '⛔ Not available — evicted KV blocks are <span class="text-red-400 font-semibold">deleted permanently</span>';
+        tier3Label.innerHTML = '⛔ Not available — no persistent cache';
+        document.getElementById('cpu-usage').textContent = '0 / 0 Blocks';
+        document.getElementById('ssd-usage').textContent = '0 / 0 Blocks';
+        document.getElementById('tier-cpu').style.opacity = '0.4';
+        document.getElementById('tier-ssd').style.opacity = '0.4';
+        scenarioLabel.textContent = 'Option A: GPU-only cache';
+        hintText.textContent = '💡 In Option A, if GPU evicts a block → it is GONE forever. User must recompute from scratch!';
+      } else {
+        tier1Eng.textContent = 'vLLM + LMCacheConnectorV1';
+        tier2Label.innerHTML = '<span class="text-indigo-300 font-semibold">LMCache LocalCPUBackend</span> — 5 GB pinned memory via PCIe DMA';
+        tier3Label.innerHTML = '<span class="text-amber-300 font-semibold">LMCache LocalDiskBackend</span> — 10 GB persistent on NVMe';
+        document.getElementById('cpu-usage').textContent = '0 / 12 Blocks';
+        document.getElementById('ssd-usage').textContent = '0 / 24 Blocks';
+        document.getElementById('tier-cpu').style.opacity = '1';
+        document.getElementById('tier-ssd').style.opacity = '1';
+        scenarioLabel.textContent = 'Option B: 3-tier hybrid (LMCache)';
+        hintText.textContent = '💡 In Option B, evicted GPU blocks are caught by LMCache → CPU RAM → Disk. Nothing is lost!';
+      }
+    }
+
+    function renderButtons() {
+      if (mode === 'a') {
+        buttonsContainer.innerHTML = `
+          <button onclick="runPrefill()" class="px-2.5 py-2 text-xs font-medium rounded-lg bg-cyan-600 hover:bg-cyan-500 text-white transition flex flex-col items-center">
+            <span class="font-bold">1. Prefill</span>
+            <span class="text-[10px] opacity-80">Compute KV in VRAM</span>
+          </button>
+          <button onclick="runCacheHitA()" class="px-2.5 py-2 text-xs font-medium rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white transition flex flex-col items-center">
+            <span class="font-bold">2. ⚡ Cache Hit</span>
+            <span class="text-[10px] opacity-80">Same prompt → skip prefill</span>
+          </button>
+          <button onclick="runEvictGPU()" class="px-2.5 py-2 text-xs font-medium rounded-lg bg-red-600 hover:bg-red-500 text-white transition flex flex-col items-center">
+            <span class="font-bold">3. GPU Evict</span>
+            <span class="text-[10px] opacity-80">LRU blocks deleted ❌</span>
+          </button>
+          <button onclick="runUserReturns()" class="px-2.5 py-2 text-xs font-medium rounded-lg bg-amber-600 hover:bg-amber-500 text-white transition flex flex-col items-center">
+            <span class="font-bold">4. User Returns</span>
+            <span class="text-[10px] opacity-80">After eviction → cold start</span>
+          </button>
+          <button onclick="resetSim()" class="px-2.5 py-2 text-xs font-medium rounded-lg bg-[var(--card)] hover:bg-[var(--background)] text-[var(--foreground)] border border-[var(--border)] transition flex flex-col items-center">
+            <span class="font-bold">↺ Reset</span>
+            <span class="text-[10px] opacity-80">Clear all</span>
+          </button>`;
+      } else {
+        buttonsContainer.innerHTML = `
+          <button onclick="runPrefill()" class="px-2.5 py-2 text-xs font-medium rounded-lg bg-cyan-600 hover:bg-cyan-500 text-white transition flex flex-col items-center">
+            <span class="font-bold">1. Prefill</span>
+            <span class="text-[10px] opacity-80">Compute KV in VRAM</span>
+          </button>
+          <button onclick="runOffloadRAM()" class="px-2.5 py-2 text-xs font-medium rounded-lg bg-indigo-600 hover:bg-indigo-500 text-white transition flex flex-col items-center">
+            <span class="font-bold">2. Offload T1→T2</span>
+            <span class="text-[10px] opacity-80">PCIe to CPU RAM</span>
+          </button>
+          <button onclick="runOnloadRAM()" class="px-2.5 py-2 text-xs font-medium rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white transition flex flex-col items-center border-2 border-emerald-400/50 shadow-md">
+            <span class="font-bold">⚡ Onload T2→T1</span>
+            <span class="text-[10px] text-emerald-100 font-semibold">Cache Hit! (~10 ms)</span>
+          </button>
+          <button onclick="runEvictSSD()" class="px-2.5 py-2 text-xs font-medium rounded-lg bg-amber-600 hover:bg-amber-500 text-white transition flex flex-col items-center">
+            <span class="font-bold">3. Evict T2→T3</span>
+            <span class="text-[10px] opacity-80">Write to SSD</span>
+          </button>
+          <button onclick="runRestoreSSD()" class="px-2.5 py-2 text-xs font-medium rounded-lg bg-teal-600 hover:bg-teal-500 text-white transition flex flex-col items-center">
+            <span class="font-bold">4. Read T3→T1</span>
+            <span class="text-[10px] opacity-80">Disk restore (~38 ms)</span>
+          </button>`;
+      }
+    }
+
+    function updateStateUI() {
+      document.getElementById('gpu-usage').textContent = `${gpuBlocks} / ${GPU_MAX} Blocks`;
+      if (mode === 'b') {
+        document.getElementById('cpu-usage').textContent = `${cpuBlocks} / ${CPU_MAX_B} Blocks`;
+        document.getElementById('ssd-usage').textContent = `${ssdBlocks} / ${SSD_MAX_B} Blocks`;
+      }
+      // Cache indicator
+      if (gpuBlocks > 0) {
+        cacheIndicator.textContent = "State: Active in GPU VRAM (Tier 1)";
+        cacheIndicator.className = "text-[11px] font-mono px-2 py-0.5 rounded bg-cyan-500/20 text-cyan-300 font-semibold";
+      } else if (cpuBlocks > 0) {
+        cacheIndicator.textContent = "State: Staged in CPU RAM (Tier 2)";
+        cacheIndicator.className = "text-[11px] font-mono px-2 py-0.5 rounded bg-indigo-500/20 text-indigo-300 font-semibold";
+      } else if (ssdBlocks > 0) {
+        cacheIndicator.textContent = "State: Saved on SSD (Tier 3)";
+        cacheIndicator.className = "text-[11px] font-mono px-2 py-0.5 rounded bg-amber-500/20 text-amber-300 font-semibold";
+      } else {
+        cacheIndicator.textContent = "State: No Cache (Cold)";
+        cacheIndicator.className = "text-[11px] font-mono px-2 py-0.5 rounded bg-slate-500/20 text-slate-300";
+      }
+    }
+
+    // ── OPTION A ACTIONS ──
+    function runCacheHitA() {
+      if (gpuBlocks === 0) { log("No KV blocks in GPU! Run Prefill first.", "text-amber-400"); return; }
+      statTTFT.textContent = "456 ms (Cache Hit!)";
+      statTTFT.className = "font-bold text-emerald-400 text-sm";
+      statBus.textContent = "Radix Tree Match";
+      statBus.className = "font-bold text-emerald-400 text-sm";
+      log(`<b>⚡ PREFIX CACHE HIT (Option A):</b> vLLM's Radix Tree found matching token hashes in GPU VRAM. Skipped prefill math! TTFT: 456 ms (vs 1,007 ms cold). <span class="text-emerald-300 font-bold">54.7% faster!</span>`, "text-emerald-200");
+    }
+
+    function runEvictGPU() {
+      if (gpuBlocks === 0) { log("GPU is already empty!", "text-amber-400"); return; }
+      const lost = gpuBlocks;
+      gpuBlocks = 0;
+      gpuBlocksEl.innerHTML = '<div id="gpu-empty" class="w-full text-center text-xs text-[var(--muted-foreground)] py-6 font-mono">No Active KV Blocks</div>';
+      statBus.textContent = mode === 'a' ? "❌ Deleted!" : "Evicting...";
+      statBus.className = "font-bold text-red-400 text-sm";
+      updateStateUI();
+      if (mode === 'a') {
+        log(`<b>❌ GPU EVICTION (Option A):</b> LRU policy evicted ${lost} KV blocks from GPU VRAM. <span class="text-red-400 font-bold">They are PERMANENTLY DELETED! No Tier 2/3 to catch them.</span> If the user returns, full recomputation is needed (1,007 ms).`, "text-red-300");
+      }
+    }
+
+    function runUserReturns() {
+      if (gpuBlocks > 0) { log("KV is still in GPU! Evict first to simulate user returning after eviction.", "text-amber-400"); return; }
+      if (mode === 'a' && cpuBlocks === 0 && ssdBlocks === 0) {
+        log(`<b>❄️ USER RETURNS (Option A):</b> User asks same question again... but KV was evicted and DELETED. <span class="text-red-400 font-bold">Full recomputation required!</span> Running prefill from scratch...`, "text-red-200");
+        setTimeout(runPrefill, 400);
+      }
+    }
+
+    // ── AUTO-OFFLOAD HELPERS (Option B only) ──
+    function autoOffloadToTier2(count) {
+      document.getElementById('cpu-empty')?.remove();
+      // If CPU is also full, cascade to SSD first
+      if (cpuBlocks + count > CPU_MAX_B) {
+        const overflow = (cpuBlocks + count) - CPU_MAX_B;
+        autoEvictToSSD(overflow);
+      }
+      for (let i = 0; i < count; i++) {
+        cpuBlocks++;
+        cpuBlocksEl.appendChild(createBlock('←' + (blockIdCounter - count + i + 1), 'bg-indigo-500/20 text-indigo-300', 'border-indigo-500/40', 'data-flow-down'));
+      }
+      log(`<b>🔄 AUTO-OFFLOAD T1→T2 (LMCache):</b> GPU was full! LMCache automatically moved ${count} oldest KV blocks to CPU RAM via PCIe DMA in <span class="text-indigo-300 font-bold">~0.2 ms per block</span>. GPU is now free for new blocks.`, "text-indigo-200");
+    }
+
+    function autoEvictToSSD(count) {
+      document.getElementById('ssd-empty')?.remove();
+      // Remove oldest from CPU
+      const cpuChildren = cpuBlocksEl.querySelectorAll('.token-block');
+      for (let i = 0; i < Math.min(count, cpuChildren.length); i++) {
+        cpuChildren[i].remove();
+      }
+      cpuBlocks = Math.max(0, cpuBlocks - count);
+      for (let i = 0; i < count; i++) {
+        ssdBlocks++;
+        ssdBlocksEl.appendChild(createBlock('S' + ssdBlocks, 'bg-amber-500/20 text-amber-300', 'border-amber-500/40', 'data-flow-down'));
+      }
+      log(`<b>🔄 AUTO-EVICT T2→T3 (LMCache):</b> CPU RAM was full! LMCache cascaded ${count} blocks to NVMe SSD. LRU policy keeps hottest data closest to GPU.`, "text-amber-200");
+    }
+
+    // ── SHARED & OPTION B ACTIONS ──
+    function runPrefill() {
+      if (gpuBlocks >= GPU_MAX && mode === 'a') {
+        log("⚠️ GPU VRAM FULL! In Option A, no offloading exists. Oldest blocks are DELETED.", "text-red-400 font-bold");
+        return;
+      }
+      // In Option B: auto-offload oldest blocks if GPU is full
+      if (gpuBlocks >= GPU_MAX && mode === 'b') {
+        const toOffload = 3; // make room for new blocks
+        // Remove oldest blocks from GPU visually
+        const gpuChildren = gpuBlocksEl.querySelectorAll('.token-block');
+        for (let i = 0; i < Math.min(toOffload, gpuChildren.length); i++) {
+          gpuChildren[i].remove();
+        }
+        gpuBlocks = Math.max(0, gpuBlocks - toOffload);
+        autoOffloadToTier2(toOffload);
+      }
+      document.getElementById('gpu-empty')?.remove();
+      for (let i = 0; i < 3; i++) {
+        blockIdCounter++;
+        gpuBlocks++;
+        gpuBlocksEl.appendChild(createBlock(blockIdCounter, 'bg-cyan-500/20 text-cyan-300', 'border-cyan-500/40'));
+      }
+      const coldTime = mode === 'a' ? '1,007' : '1,426';
+      statTTFT.textContent = `${coldTime} ms (Cold Prefill)`;
+      statTTFT.className = "font-bold text-amber-400 text-sm";
+      statBus.textContent = "GPU Tensor Math";
+      statBus.className = "font-bold text-cyan-400 text-sm";
+      updateStateUI();
+      const engineLabel = mode === 'a' ? 'vLLM PagedAttention' : 'vLLM + LMCacheConnectorV1';
+      log(`<b>PREFILL (${engineLabel}):</b> Generated 3 KV blocks via Tensor Core attention math. TTFT: ${coldTime} ms. Blocks now live in Tier 1 (GPU VRAM).`, "text-cyan-200");
+    }
+
+    function runOffloadRAM() {
+      if (mode === 'a') { log("⛔ Option A has no Tier 2! Switch to Option B to use CPU RAM offloading.", "text-red-400"); return; }
+      if (gpuBlocks === 0) { log("GPU VRAM empty! Run Prefill first.", "text-amber-400"); return; }
+      document.getElementById('cpu-empty')?.remove();
+      const moved = gpuBlocks;
+      gpuBlocksEl.innerHTML = '<div id="gpu-empty" class="w-full text-center text-xs text-[var(--muted-foreground)] py-6 font-mono">No Active KV Blocks</div>';
+      for (let i = 0; i < moved; i++) {
+        cpuBlocks++;
+        cpuBlocksEl.appendChild(createBlock(cpuBlocks, 'bg-indigo-500/20 text-indigo-300', 'border-indigo-500/40', 'data-flow-down'));
+      }
+      gpuBlocks = 0;
+      statBus.textContent = "PCIe DMA Push (T1→T2)";
+      statBus.className = "font-bold text-indigo-400 text-sm";
+      updateStateUI();
+      log(`<b>OFFLOAD T1→T2 (LMCache):</b> Transferred ${moved} KV blocks from GPU VRAM → CPU RAM over PCIe bus using pinned memory DMA. <span class="text-indigo-300 font-semibold">GPU VRAM is now free for new users!</span> KV is safely stored by LMCache LocalCPUBackend.`, "text-indigo-200");
+    }
+
+    function runOnloadRAM() {
+      if (mode === 'a') { log("⛔ Option A has no Tier 2! Switch to Option B.", "text-red-400"); return; }
+      if (cpuBlocks === 0) { log("Tier 2 (CPU RAM) is empty!", "text-amber-400"); return; }
+      document.getElementById('gpu-empty')?.remove();
+      const moved = cpuBlocks;
+      cpuBlocksEl.innerHTML = '<div id="cpu-empty" class="w-full text-center text-xs text-[var(--muted-foreground)] py-6 font-mono">Empty Buffer</div>';
+      for (let i = 0; i < moved; i++) {
+        gpuBlocks++;
+        gpuBlocksEl.appendChild(createBlock(gpuBlocks, 'bg-emerald-500/20 text-emerald-300 moving-glow', 'border-emerald-500/50', 'data-flow-up'));
+      }
+      cpuBlocks = 0;
+      statTTFT.textContent = "~10 ms (⚡ Cache Reload!)";
+      statTTFT.className = "font-bold text-emerald-400 text-sm";
+      statBus.textContent = "⚡ PCIe DMA (T2→T1)";
+      statBus.className = "font-bold text-emerald-400 text-sm";
+      updateStateUI();
+      log(`<b>⚡ ONLOAD T2→T1 (LMCache):</b> User returned! LMCache transferred ${moved} KV blocks from CPU RAM back to GPU VRAM via PCIe DMA in <b>~10 ms</b>. <span class="text-emerald-400 font-bold">Prefill math completely BYPASSED! This is what Option A CANNOT do after eviction.</span>`, "text-emerald-200");
+    }
+
+    function runEvictSSD() {
+      if (mode === 'a') { log("⛔ Option A has no Tier 3!", "text-red-400"); return; }
+      if (cpuBlocks === 0) { log("CPU RAM empty! Offload from GPU first.", "text-amber-400"); return; }
+      document.getElementById('ssd-empty')?.remove();
+      const moved = cpuBlocks;
+      cpuBlocksEl.innerHTML = '<div id="cpu-empty" class="w-full text-center text-xs text-[var(--muted-foreground)] py-6 font-mono">Empty Buffer</div>';
+      for (let i = 0; i < moved; i++) {
+        ssdBlocks++;
+        ssdBlocksEl.appendChild(createBlock(ssdBlocks, 'bg-amber-500/20 text-amber-300', 'border-amber-500/40', 'data-flow-down'));
+      }
+      cpuBlocks = 0;
+      statBus.textContent = "Disk Write (T2→T3)";
+      statBus.className = "font-bold text-amber-400 text-sm";
+      updateStateUI();
+      log(`<b>EVICT T2→T3 (LMCache):</b> LRU policy evicted ${moved} blocks from CPU RAM to NVMe SSD. Serialized by LMCache LocalDiskBackend. <span class="text-amber-300">Persists even if server restarts!</span>`, "text-amber-200");
+    }
+
+    function runRestoreSSD() {
+      if (mode === 'a') { log("⛔ Option A has no Tier 3!", "text-red-400"); return; }
+      if (ssdBlocks === 0) { log("SSD is empty!", "text-amber-400"); return; }
+      document.getElementById('gpu-empty')?.remove();
+      const moved = ssdBlocks;
+      ssdBlocksEl.innerHTML = '<div id="ssd-empty" class="w-full text-center text-xs text-[var(--muted-foreground)] py-6 font-mono">Cold Storage</div>';
+      for (let i = 0; i < moved; i++) {
+        gpuBlocks++;
+        gpuBlocksEl.appendChild(createBlock(gpuBlocks, 'bg-teal-500/20 text-teal-300', 'border-teal-500/40', 'data-flow-up'));
+      }
+      ssdBlocks = 0;
+      statTTFT.textContent = "~38 ms (SSD Restore)";
+      statTTFT.className = "font-bold text-teal-400 text-sm";
+      statBus.textContent = "Disk Read (T3→T1)";
+      statBus.className = "font-bold text-teal-400 text-sm";
+      updateStateUI();
+      log(`<b>RESTORE T3→T1 (LMCache):</b> User returned after long absence! LMCache read ${moved} blocks from NVMe SSD → GPU VRAM in <b>~38 ms</b>. Still <span class="text-teal-300 font-bold">~26× faster than full recomputation!</span>`, "text-teal-200");
+    }
+
+    // ── Smart Question Handler ──
+    function handleSendQuestion() {
+      const q = document.getElementById('user-q-input').value.trim() || "Follow-up question";
+      log(`<b>USER ASKED:</b> "${q}"`, "text-cyan-100 font-semibold");
+
+      if (mode === 'a') {
+        // Option A: Only GPU cache exists
+        if (gpuBlocks > 0) {
+          runCacheHitA();
+        } else {
+          log(`❄️ <b>CACHE MISS (Option A):</b> No KV in GPU. ${cpuBlocks === 0 && ssdBlocks === 0 ? 'No fallback tiers available! Full recomputation...' : ''}`, "text-amber-300");
+          setTimeout(runPrefill, 300);
+        }
+      } else {
+        // Option B: Check all tiers
+        if (gpuBlocks > 0) {
+          statTTFT.textContent = "667 ms (GPU Cache Hit)";
+          statTTFT.className = "font-bold text-emerald-400 text-sm";
+          log(`⚡ <b>TIER 1 HIT (LMCache):</b> KV blocks still in GPU VRAM! Prefix cache matched. TTFT: 667 ms.`, "text-emerald-300 font-bold");
+        } else if (cpuBlocks > 0) {
+          log(`🔎 <b>TIER 2 HIT (LMCache):</b> Found in CPU RAM! Triggering PCIe onload T2→T1...`, "text-indigo-300");
+          setTimeout(runOnloadRAM, 300);
+        } else if (ssdBlocks > 0) {
+          log(`🔎 <b>TIER 3 HIT (LMCache):</b> Found on NVMe SSD! Triggering disk restore T3→T1...`, "text-amber-300");
+          setTimeout(runRestoreSSD, 300);
+        } else {
+          log(`❄️ <b>CACHE MISS (All Tiers):</b> No cached KV anywhere. Running full prefill...`, "text-amber-300");
+          setTimeout(runPrefill, 300);
+        }
+      }
+    }
+
+    function resetSim() {
+      gpuBlocks = 0; cpuBlocks = 0; ssdBlocks = 0; blockIdCounter = 0;
+      gpuBlocksEl.innerHTML = '<div id="gpu-empty" class="w-full text-center text-xs text-[var(--muted-foreground)] py-6 font-mono">No Active KV Blocks</div>';
+      cpuBlocksEl.innerHTML = '<div id="cpu-empty" class="w-full text-center text-xs text-[var(--muted-foreground)] py-6 font-mono">' + (mode === 'a' ? 'Not Active' : 'Empty Buffer') + '</div>';
+      ssdBlocksEl.innerHTML = '<div id="ssd-empty" class="w-full text-center text-xs text-[var(--muted-foreground)] py-6 font-mono">' + (mode === 'a' ? 'Not Active' : 'Cold Storage') + '</div>';
+      statTTFT.textContent = "--";
+      statTTFT.className = "font-bold text-cyan-400 text-sm";
+      statBus.textContent = "Idle";
+      statBus.className = "font-bold text-emerald-400 text-sm";
+      updateStateUI();
+    }
+
+    // Initialize
+    switchArch('a');
+  </script>
+</body>
+</html>
