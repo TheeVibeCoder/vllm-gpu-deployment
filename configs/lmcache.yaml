@@ -5,3 +5,5 @@ local_disk: /tmp/lmcache_disk
 max_local_disk_size: 10.0
 cache_policy: lru
 save_decode_cache: true
+min_retrieve_tokens: 64
+

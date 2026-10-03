@@ -1,0 +1,312 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <script src="https://www.gstatic.com/antigravity/web/dev/tailwindcss.min.js"></script>
+</head>
+<body class="bg-transparent text-[var(--foreground)] antialiased p-3">
+  <div class="bg-[var(--card)] text-[var(--foreground)] border border-[var(--border)] rounded-2xl p-6 shadow-xl max-w-5xl mx-auto space-y-6">
+    
+    <!-- Header -->
+    <div class="flex flex-wrap items-center justify-between border-b border-[var(--border)] pb-4 gap-3">
+      <div>
+        <div class="flex items-center gap-2">
+          <span class="inline-block w-3 h-3 rounded-full bg-emerald-500 animate-ping"></span>
+          <h2 class="text-xl font-bold tracking-tight text-[var(--foreground)]">vLLM GPU Execution & KV Cache Simulator</h2>
+        </div>
+        <p class="text-xs text-[var(--muted-foreground)] mt-1">Both User 1 and User 2 retain their KV blocks in VRAM for instant follow-up speed until memory pressure triggers LRU eviction.</p>
+      </div>
+      <div class="flex flex-wrap items-center gap-2">
+        <button id="u2-turn1-btn" class="px-3 py-1.5 bg-sky-600 hover:bg-sky-500 text-white rounded-lg text-xs font-semibold shadow transition-all cursor-pointer active:scale-95">
+          1. Send User 2 Question
+        </button>
+        <button id="u2-turn2-btn" class="px-3 py-1.5 bg-emerald-700 hover:bg-emerald-600 text-white rounded-lg text-xs font-semibold shadow transition-all cursor-pointer active:scale-95 opacity-50 cursor-not-allowed" disabled>
+          2. Send User 2 Follow-Up (Cache Hit)
+        </button>
+        <button id="fill-btn" class="px-3 py-1.5 bg-amber-600 hover:bg-amber-500 text-white rounded-lg text-xs font-semibold shadow transition-all cursor-pointer active:scale-95">
+          3. Flood Memory (Test Eviction)
+        </button>
+        <button id="reset-btn" class="px-2.5 py-1.5 bg-[var(--sidebar)] hover:bg-[var(--border)] text-[var(--muted-foreground)] rounded-lg text-xs font-medium border border-[var(--border)] cursor-pointer">
+          Reset
+        </button>
+      </div>
+    </div>
+
+    <!-- Active Step Flow Bar -->
+    <div class="grid grid-cols-4 gap-3 text-center text-xs font-medium">
+      <div id="step-1-card" class="p-2.5 rounded-xl border border-[var(--border)] bg-[var(--sidebar)] transition-all duration-300">
+        <div class="font-bold text-emerald-400 mb-0.5">1. Edge & Proxy</div>
+        <div class="text-[10px] text-[var(--muted-foreground)]">HTTPS (443) → Port 8000</div>
+      </div>
+      <div id="step-2-card" class="p-2.5 rounded-xl border border-[var(--border)] bg-[var(--sidebar)] transition-all duration-300">
+        <div class="font-bold text-sky-400 mb-0.5">2. FastAPI & Hermes</div>
+        <div class="text-[10px] text-[var(--muted-foreground)]">Tokenizer & Tool Parser</div>
+      </div>
+      <div id="step-3-card" class="p-2.5 rounded-xl border border-[var(--border)] bg-[var(--sidebar)] transition-all duration-300">
+        <div class="font-bold text-amber-400 mb-0.5">3. Scheduler Engine</div>
+        <div class="text-[10px] text-[var(--muted-foreground)]">Continuous Batching</div>
+      </div>
+      <div id="step-4-card" class="p-2.5 rounded-xl border border-[var(--border)] bg-[var(--sidebar)] transition-all duration-300">
+        <div class="font-bold text-violet-400 mb-0.5">4. Physical VRAM</div>
+        <div class="text-[10px] text-[var(--muted-foreground)]">Marlin 8-Bit + Paged KV</div>
+      </div>
+    </div>
+
+    <!-- Core Layout -->
+    <div class="grid grid-cols-1 md:grid-cols-3 gap-6">
+      
+      <!-- Left Column: Status of Both Users -->
+      <div class="space-y-4">
+        <div class="border border-[var(--border)] rounded-xl p-4 bg-[var(--sidebar)] space-y-3">
+          <div class="flex items-center justify-between">
+            <h3 class="text-xs font-bold uppercase tracking-wider text-amber-400">User Session States</h3>
+            <span id="active-slots" class="text-[10px] px-2 py-0.5 rounded-full bg-emerald-500/20 text-emerald-300 font-mono">1 Cached</span>
+          </div>
+
+          <!-- User 1 -->
+          <div class="p-3 rounded-lg border border-amber-500/40 bg-amber-950/20 text-xs font-mono space-y-1">
+            <div class="flex items-center justify-between">
+              <span class="font-bold text-amber-300">User 1 (You)</span>
+              <span id="u1-badge" class="text-[10px] px-1.5 py-0.5 rounded bg-amber-500/30 text-amber-200">CACHED IN VRAM</span>
+            </div>
+            <div class="text-[11px] text-[var(--muted-foreground)]">Status: Finished turn. 6 blocks kept warm in VRAM.</div>
+          </div>
+
+          <!-- User 2 -->
+          <div id="u2-card" class="p-3 rounded-lg border border-[var(--border)] bg-[var(--card)] text-xs font-mono space-y-1">
+            <div class="flex items-center justify-between">
+              <span class="font-bold text-sky-300">User 2 (Teammate)</span>
+              <span id="u2-badge" class="text-[10px] px-1.5 py-0.5 rounded bg-[var(--border)] text-[var(--muted-foreground)]">IDLE</span>
+            </div>
+            <div id="u2-desc" class="text-[11px] text-[var(--muted-foreground)]">Status: Not connected yet.</div>
+          </div>
+        </div>
+
+        <!-- Explanation Card -->
+        <div class="border border-[var(--border)] rounded-xl p-4 bg-[var(--sidebar)] text-xs space-y-2">
+          <div class="font-bold text-emerald-400">💡 Why Blocks Don't Disappear:</div>
+          <p class="text-[11px] text-[var(--muted-foreground)] leading-relaxed">
+            When a user gets their answer, vLLM <strong>keeps their KV blocks warm</strong> in VRAM. If that user sends a follow-up, it re-uses the blocks instantly (0.1s latency). Blocks are <em>only</em> erased if memory fills up and another user needs the space!
+          </p>
+        </div>
+      </div>
+
+      <!-- Right Column: Physical VRAM & 32 Pages Grid -->
+      <div class="md:col-span-2 border border-[var(--border)] rounded-xl p-5 bg-[var(--sidebar)] space-y-4">
+        
+        <div class="flex items-center justify-between">
+          <div>
+            <h3 class="text-sm font-bold text-violet-300 flex items-center gap-2">
+              <span>Physical GPU VRAM Allocation</span>
+              <span class="text-[10px] font-normal px-2 py-0.5 rounded bg-violet-500/20 text-violet-300">NVIDIA L4 (24GB)</span>
+            </h3>
+            <p class="text-xs text-[var(--muted-foreground)] mt-0.5">8.29 GB Static Weights + 11.03 GB Dynamic Paged KV Cache</p>
+          </div>
+          <div class="text-right font-mono text-xs">
+            <span id="vram-used-text" class="text-emerald-400 font-bold">10.10 GB Used</span> <span class="text-[var(--muted-foreground)]">/ 24.00 GB</span>
+          </div>
+        </div>
+
+        <!-- Visual VRAM Bar -->
+        <div class="h-9 w-full rounded-xl overflow-hidden border border-[var(--border)] flex text-[10px] font-bold text-center">
+          <div class="bg-violet-700 text-white flex items-center justify-center transition-all duration-500" style="width: 35%;" title="8.29 GB Static Weights">
+            8-Bit Weights (8.29 GB)
+          </div>
+          <div id="prefix-vram" class="bg-emerald-600 text-white flex items-center justify-center transition-all duration-500" style="width: 15%;" title="Prefix Cache (System & Tools)">
+            Prefix (P)
+          </div>
+          <div id="u1-vram" class="bg-amber-600 text-white flex items-center justify-center transition-all duration-500" style="width: 12%;" title="User 1 KV Cache">
+            User 1 (U1)
+          </div>
+          <div id="u2-vram" class="bg-sky-600 text-white flex items-center justify-center transition-all duration-500 hidden" style="width: 0%;" title="User 2 KV Cache">
+            User 2 (U2)
+          </div>
+          <div id="free-vram" class="bg-[var(--card)] text-[var(--muted-foreground)] flex items-center justify-center transition-all duration-500" style="width: 38%;" title="Free VRAM Headroom">
+            Free KV Pool
+          </div>
+        </div>
+
+        <!-- PagedAttention Visual Grid -->
+        <div class="border border-[var(--border)] rounded-xl p-3 bg-[var(--card)] space-y-2">
+          <div class="flex items-center justify-between text-xs font-semibold">
+            <span class="text-[var(--foreground)]">PagedAttention Virtual Block Table (Sample of 32 Pages):</span>
+            <span class="text-[10px] text-[var(--muted-foreground)] font-mono">1 block = 16 tokens</span>
+          </div>
+          <div id="memory-blocks" class="grid grid-cols-8 sm:grid-cols-16 gap-1.5">
+            <!-- 32 blocks generated by JS -->
+          </div>
+          <div class="flex items-center gap-4 text-[10px] text-[var(--muted-foreground)] pt-1">
+            <div class="flex items-center gap-1.5"><span class="w-2.5 h-2.5 rounded bg-emerald-500/40 border border-emerald-500"></span> P = Prefix Cache (System)</div>
+            <div class="flex items-center gap-1.5"><span class="w-2.5 h-2.5 rounded bg-amber-500/40 border border-amber-500"></span> U1 = User 1 (You)</div>
+            <div class="flex items-center gap-1.5"><span class="w-2.5 h-2.5 rounded bg-sky-500/40 border border-sky-500"></span> U2 = User 2 (Teammate)</div>
+            <div class="flex items-center gap-1.5"><span class="w-2.5 h-2.5 rounded bg-[var(--sidebar)] border border-[var(--border)]"></span> · = Free Block</div>
+          </div>
+        </div>
+
+      </div>
+
+    </div>
+
+    <!-- Live Event Stream Console -->
+    <div class="border border-[var(--border)] rounded-xl p-3.5 bg-[var(--background)] font-mono text-xs space-y-1 text-[var(--muted-foreground)]">
+      <div class="flex items-center justify-between pb-1 border-b border-[var(--border)] text-[10px] uppercase font-bold text-[var(--foreground)]">
+        <span>Scheduler & Memory Event Stream</span>
+        <span class="text-emerald-400">● Live</span>
+      </div>
+      <div id="log-console" class="h-20 overflow-y-auto space-y-1 pt-1 text-[11px]">
+        <div>[System] Model Qwen2.5-7B-Instruct-GPTQ-Int8 loaded into 8.29 GB VRAM via Marlin assembly.</div>
+        <div>[PrefixCache] 8 blocks (128 tokens) reserved for shared system prompt & Hermes tool signatures.</div>
+        <div>[User 1] Turn finished. 6 blocks (96 tokens) retained in warm cache. Zero memory pressure.</div>
+      </div>
+    </div>
+
+  </div>
+
+  <script>
+    const memoryBlocksContainer = document.getElementById('memory-blocks');
+    const totalBlocks = 32;
+
+    function renderInitialBlocks() {
+      memoryBlocksContainer.innerHTML = '';
+      for (let i = 0; i < totalBlocks; i++) {
+        const block = document.createElement('div');
+        block.id = `block-${i}`;
+        block.className = 'h-6 rounded border text-[9px] flex items-center justify-center font-mono transition-all duration-300';
+        if (i < 8) {
+          block.className += ' bg-emerald-500/30 text-emerald-300 border-emerald-500/50';
+          block.innerText = 'P';
+          block.title = `Block ${i}: Shared System Prefix`;
+        } else if (i < 14) {
+          block.className += ' bg-amber-500/30 text-amber-300 border-amber-500/50';
+          block.innerText = 'U1';
+          block.title = `Block ${i}: User 1 (Cached in VRAM)`;
+        } else {
+          block.className += ' bg-[var(--sidebar)] text-[var(--muted-foreground)] border-[var(--border)]';
+          block.innerText = '·';
+          block.title = `Block ${i}: Free`;
+        }
+        memoryBlocksContainer.appendChild(block);
+      }
+    }
+    renderInitialBlocks();
+
+    const u2Turn1Btn = document.getElementById('u2-turn1-btn');
+    const u2Turn2Btn = document.getElementById('u2-turn2-btn');
+    const fillBtn = document.getElementById('fill-btn');
+    const resetBtn = document.getElementById('reset-btn');
+    const logConsole = document.getElementById('log-console');
+    const u2Card = document.getElementById('u2-card');
+    const u2Badge = document.getElementById('u2-badge');
+    const u2Desc = document.getElementById('u2-desc');
+    const u2Vram = document.getElementById('u2-vram');
+    const freeVram = document.getElementById('free-vram');
+    const vramUsedText = document.getElementById('vram-used-text');
+    const activeSlots = document.getElementById('active-slots');
+
+    function log(msg) {
+      const div = document.createElement('div');
+      div.innerText = `[${new Date().toLocaleTimeString()}] ${msg}`;
+      logConsole.appendChild(div);
+      logConsole.scrollTop = logConsole.scrollHeight;
+    }
+
+    // 1. User 2 sends Turn 1
+    u2Turn1Btn.addEventListener('click', () => {
+      u2Turn1Btn.disabled = true;
+      u2Turn1Btn.classList.add('opacity-50', 'cursor-not-allowed');
+
+      log("⚡ Ingress: User 2 (Teammate) sent question: 'What is the weather in New York?'");
+      u2Card.className = "p-3 rounded-lg border border-sky-500/50 bg-sky-950/20 text-xs font-mono space-y-1";
+      u2Badge.className = "text-[10px] px-1.5 py-0.5 rounded bg-sky-500/30 text-sky-200";
+      u2Badge.innerText = "ACTIVE (PREFILL)";
+      u2Desc.innerText = "Merging via Continuous Batching...";
+
+      setTimeout(() => {
+        log("🧠 PagedAttention: Allocating blocks 14–19 in VRAM for User 2.");
+        for (let i = 14; i < 20; i++) {
+          const blk = document.getElementById(`block-${i}`);
+          blk.className = 'h-6 rounded border border-sky-500/60 bg-sky-500/40 text-sky-100 text-[9px] flex items-center justify-center font-mono';
+          blk.innerText = 'U2';
+        }
+        u2Vram.classList.remove('hidden');
+        u2Vram.style.width = '12%';
+        freeVram.style.width = '26%';
+        vramUsedText.innerText = "12.20 GB Used";
+        activeSlots.innerText = "2 Users (U1+U2)";
+        u2Badge.innerText = "DECODING";
+        u2Desc.innerText = "Generating tokens using Marlin INT8 kernel...";
+      }, 800);
+
+      setTimeout(() => {
+        log("✅ Turn 1 Complete: User 2 received tool response in 420ms.");
+        log("🔒 KEY RULE: User 2's blocks (14–19) ARE NOT DELETED! Kept warm in VRAM for turn 2!");
+        u2Badge.className = "text-[10px] px-1.5 py-0.5 rounded bg-sky-500/20 text-sky-300 border border-sky-500/30";
+        u2Badge.innerText = "CACHED IN VRAM";
+        u2Desc.innerText = "Turn 1 finished. 6 blocks kept warm in cache for instant follow-up.";
+
+        u2Turn2Btn.disabled = false;
+        u2Turn2Btn.classList.remove('opacity-50', 'cursor-not-allowed');
+      }, 2000);
+    });
+
+    // 2. User 2 sends Turn 2 (Cache Hit)
+    u2Turn2Btn.addEventListener('click', () => {
+      u2Turn2Btn.disabled = true;
+      u2Turn2Btn.classList.add('opacity-50', 'cursor-not-allowed');
+
+      log("🚀 User 2 sent follow-up: 'What about tomorrow?'");
+      log("⚡ PREFIX CACHE HIT! vLLM found existing U2 blocks (14–19) already in VRAM!");
+      log("⏩ Prefill skipped! Generation starts instantly in 110ms!");
+      u2Badge.innerText = "CACHE HIT (0.1s)";
+      u2Badge.className = "text-[10px] px-1.5 py-0.5 rounded bg-emerald-500/30 text-emerald-200";
+
+      // Append 2 more blocks for follow-up tokens
+      for (let i = 20; i < 22; i++) {
+        const blk = document.getElementById(`block-${i}`);
+        blk.className = 'h-6 rounded border border-sky-500/60 bg-sky-500/40 text-sky-100 text-[9px] flex items-center justify-center font-mono';
+        blk.innerText = 'U2';
+      }
+      u2Vram.style.width = '16%';
+      freeVram.style.width = '22%';
+      vramUsedText.innerText = "12.80 GB Used";
+
+      setTimeout(() => {
+        log("✅ Turn 2 Complete: Total tokens cached: 128 tokens across both turns.");
+        u2Badge.innerText = "CACHED (TURN 2)";
+        u2Badge.className = "text-[10px] px-1.5 py-0.5 rounded bg-sky-500/20 text-sky-300 border border-sky-500/30";
+      }, 1200);
+    });
+
+    // 3. Flood Memory (Simulate 10 Users & Eviction)
+    fillBtn.addEventListener('click', () => {
+      log("🚨 SIMULATION: 10 new teammates send large 4,000-token queries!");
+      log("⚠️ Memory Pressure: All free blocks (22–31) filled immediately.");
+
+      for (let i = 22; i < 32; i++) {
+        const blk = document.getElementById(`block-${i}`);
+        blk.className = 'h-6 rounded border border-red-500/50 bg-red-500/30 text-red-200 text-[9px] flex items-center justify-center font-mono';
+        blk.innerText = 'NEW';
+      }
+      freeVram.style.width = '0%';
+      freeVram.innerText = '0% Free';
+      vramUsedText.innerText = "24.00 GB (100% FULL)";
+
+      setTimeout(() => {
+        log("🧹 LRU EVICTION TRIGGERED: GPU needed space for active users!");
+        log("👋 Evicting oldest idle blocks first (User 1 blocks 8–13 evicted).");
+        for (let i = 8; i < 14; i++) {
+          const blk = document.getElementById(`block-${i}`);
+          blk.className = 'h-6 rounded border border-red-500/50 bg-red-500/30 text-red-200 text-[9px] flex items-center justify-center font-mono';
+          blk.innerText = 'NEW';
+        }
+        document.getElementById('u1-badge').className = "text-[10px] px-1.5 py-0.5 rounded bg-red-500/30 text-red-200";
+        document.getElementById('u1-badge').innerText = "EVICTED (OUT OF VRAM)";
+      }, 1500);
+    });
+
+    resetBtn.addEventListener('click', () => {
+      location.reload();
+    });
+  </script>
+</body>
+</html>

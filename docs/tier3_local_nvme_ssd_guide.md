@@ -81,16 +81,15 @@ $$\text{If } \text{Disk Read Latency} > \text{GPU Recomputation Time} \longright
 
 ## 4. State-of-the-Art Approaches on the Internet
 
-### 1. LMCache (`local_disk` with Direct I/O & Prefetching)
-* **Asynchronous `put()`**: Disk writes happen in a dedicated background worker thread; the inference loop never freezes.
-* **Direct I/O (`use_odirect: true`)**: Bypasses the Linux page cache and buffer copy overhead, streaming directly from NVMe into pinned host memory.
-* **Asynchronous Prefetching**: Predicts which KV blocks are needed next and begins reading them from SSD into RAM before the model reaches those attention layers.
+### 1. LMCache (`local_disk`)
+* LMCache disk behavior depends on the installed version; **LMCache v0.5.5 does not recognize `use_odirect`** on the reported deployment. Do not assume the config flag enables direct reads.
+* The HTTP cold/warm timings in this repo cannot distinguish a hit in CPU RAM, page cache, SSD, or GPU VRAM.
 
 ### 2. DirectKV (OSDI 2026 Research Paper)
-* **Zero-Copy Architecture**: Eliminates the intermediate hop (`SSD -> Host RAM -> GPU VRAM`). Enables the GPU to access memory-mapped host address spaces directly across NVLink-C2C interconnects.
+* DirectKV's NVLink-C2C path requires different hardware (for example GH200/GB200), not the PCIe Tesla T4. This repository does not run DirectKV.
 
 ### 3. NVIDIA GPUDirect Storage (GDS)
-* **Direct DMA**: Uses PCIe peer-to-peer DMA between the NVMe controller and GPU memory, completely bypassing CPU host memory and CPU cores. Reaches raw wire speeds (up to 14 GB/s on PCIe Gen5 NVMe).
+* GDS can provide NVMe-to-GPU DMA when the GPU, NVMe controller, driver and file system all support it. The existence of `libcufile.so` alone proves nothing about the active data path; cuFile may fall back to host-memory compatibility mode.
 
 ### 4. DeepSpeed-ZeRO-Inference
 * Pioneered early NVMe offloading, but suffered from synchronous I/O blocks (causing decode stutter or "freezes" during generation).
@@ -112,11 +111,12 @@ max_local_cpu_size: 5.0                 # 5.0 GB in host memory
 local_disk: /path/to/fast_nvme/lmcache  # Mount path of high-speed local NVMe drive
 max_local_disk_size: 50.0               # Max storage pool size (e.g., 50 GB)
 
-# Advanced Performance Flags
-use_odirect: true                       # Bypass OS page cache for direct NVMe DMA
+# Optional flags depend on the installed LMCache version; validate before use.
 save_decode_cache: true                 # Save generation tokens in addition to prefill
 min_retrieve_tokens: 64                 # Skip disk I/O if prompt is smaller than 64 tokens
 ```
+
+For an independent transfer comparison (not an LMCache path measurement), see the **Raw SSD → GPU VRAM transfer benchmark** section of [`README.md`](../README.md). Its buffered, `O_DIRECT` + pinned CUDA, and cuFile paths all validate bytes in VRAM; it does not prove a cold physical SSD read or P2P merely by succeeding. Check the local mount with `gdscheck -p` and compare `nvidia-fs` direct-read counters before/after before calling a cuFile result GDS.
 
 ---
 

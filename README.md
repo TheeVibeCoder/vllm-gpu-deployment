@@ -65,6 +65,63 @@ Empirical performance captured on the **NVIDIA Tesla T4 (16 GB)** running **`Qwe
 
 ---
 
+## Raw SSD → GPU VRAM transfer benchmark (separate from HTTP TTFT)
+
+`scripts/benchmark_ssd_gpu.cpp` creates a **4 MiB** temporary chunk on the directory you specify, writes and `fsync`s it, then times complete reads into GPU VRAM on the GPU host. By default it uses reproducible, nonzero synthetic KV-sized bytes; to use real KV bytes, supply a pre-existing raw KV chunk with `--input /path/to/kv-chunk.raw` (at least `--bytes` bytes). The first `--bytes` bytes become the fixture for all three paths:
+
+| Mode | Timed operation | Availability |
+|---|---|---|
+| Buffered | `pread` into pageable host RAM + synchronous `cudaMemcpy` | CUDA GPU |
+| Direct I/O | aligned `O_DIRECT` `pread` into CUDA-registered pinned RAM + `cudaMemcpyAsync` + stream synchronization | Linux mount and pinned memory support |
+| cuFile | registered `cuFileRead` into GPU memory (synchronous) | cuFile library, compatible driver/mount; **P2P not proven by an API call** |
+
+### Measured on the running Lightning Tesla T4 (2026-09-30)
+
+Input: a **3,145,728-byte LMCache `.pt` KV chunk** already present on the Studio. The benchmark copied its bytes to a temporary file on each tested filesystem, then performed 3 warmups and 20 validated disk-to-VRAM transfers for each **successful** mode. These are **microseconds for the combined file read and GPU copy**, not HTTP response times:
+
+| Fixture filesystem | Buffered mean / p95 | `O_DIRECT` + pinned mean / p95 | cuFile |
+|---|---:|---:|---|
+| `/tmp` (`overlay`, same filesystem as `/tmp/lmcache_disk`) | 8,894.4 / 9,180.9 µs | **2,107.1 / 2,179.3 µs** | Unavailable: handle registration failed (5027) |
+| `/teamspace` (`ext4` on LVM) | 9,392.2 / 10,965.1 µs | **2,504.9 / 3,465.3 µs** | Unavailable: handle registration failed (5027) |
+
+The combined direct-I/O **and pinned-memory** path was ~4.2× faster than the buffered/pageable path on the actual LMCache filesystem. This does **not** isolate the benefit of `O_DIRECT` from pinned memory or prove cold physical NVMe reads. Read-only `dmsetup table vg_data-lv_data` showed `/teamspace`'s LVM is **striped across two devices**: an Amazon EBS NVMe volume (`nvme1n1`) and an instance-local NVMe device (`nvme2n1`); it is **not a local-SSD-only mount**. `/tmp` is an overlay, so its physical backing cannot be identified from the container path alone. cuFile could not register the file handle on either mount; `nvidia-fs` reported `Ops Read=0` before/after, with I/O stats disabled. **No GDS transfer latency or P2P speedup was measured.** Do not reformat the NVMe device: it is part of an active striped volume.
+
+On the **Linux GPU machine** with CUDA toolkit, cuFile headers/library and a writable **local NVMe** directory:
+
+```bash
+nvcc -std=c++17 -x cu scripts/benchmark_ssd_gpu.cpp -o benchmark_ssd_gpu -lcufile
+# Omit --input for a synthetic 4 MiB KV-sized fixture instead.
+./benchmark_ssd_gpu --disk-dir /path/to/local/nvme --bytes 4194304 --iterations 20 --warmups 3
+# Or use a real raw KV chunk, if available:
+./benchmark_ssd_gpu --disk-dir /path/to/local/nvme --input /path/to/kv-chunk.raw --bytes 4194304 --iterations 20 --warmups 3
+```
+
+The benchmark prints mean/p50/p95 elapsed microseconds and decimal MB/s for each completed mode. Fixture setup, memory registration and byte-for-byte GPU readback are outside the timed region; data is checked after **every** transfer. Unsupported modes are explicitly skipped, not silently simulated. The file is temporary and removed after the run. Run `./benchmark_ssd_gpu --help` for options. This is a raw transfer comparison, **not** an LMCache/vLLM integration or TTFT benchmark; it does not measure DirectKV.
+
+For the buffered path, Linux `POSIX_FADV_DONTNEED` is requested between iterations, **outside** timing. This is advisory, not proof of cold NVMe reads; page-cache hits and storage/controller caches can still influence results. `O_DIRECT` bypasses Linux page cache where supported but does not guarantee data came from flash. cuFile can silently use host-memory compatibility mode, so do **not** report its result as direct P2P DMA until the **tested mount/device** is checked with `gdscheck -p` and a before/after comparison of `/proc/driver/nvidia-fs/stats` showing actual direct reads. `libcufile.so` presence alone is not proof.
+
+On the GPU host, capture evidence for the cuFile mode before claiming peer-to-peer DMA:
+
+```bash
+if test -x /usr/local/cuda/gds/tools/gdscheck; then /usr/local/cuda/gds/tools/gdscheck -p; fi
+cat /proc/driver/nvidia-fs/stats        # Snapshot before the benchmark
+./benchmark_ssd_gpu --disk-dir /path/to/local/nvme --iterations 20
+cat /proc/driver/nvidia-fs/stats        # Compare direct I/O counters and bytes
+```
+
+If `nvidia-fs` is absent or counters do not show direct reads, label that run **cuFile API only**, not proven GDS. Some hosts require root to view these counters.
+
+On a Mac without CUDA, only the fixture/read/check smoke path can be exercised:
+
+```bash
+clang++ -std=c++17 -O2 scripts/benchmark_ssd_gpu.cpp -o /tmp/ssd-gpu-bench-smoke
+/tmp/ssd-gpu-bench-smoke --cpu-only --disk-dir /tmp --iterations 3
+```
+
+The CPU-only output is **not** a GPU benchmark; use the T4 measurements above for GPU results and rerun on your own SSD mount to assess its backing storage.
+
+---
+
 ## 📁 Repository Structure
 
 ```text
@@ -83,9 +140,11 @@ vllm-gpu-deployment/
 │   ├── launch_vllm_lmcache.sh          # Native LMCacheConnectorV1 multi-tier launcher
 │   ├── test_client.py                  # Test client to verify chat & tool completions
 │   ├── test_prefix_caching.py          # Native prefix caching benchmark
+│   ├── benchmark_ssd_gpu.cpp           # Raw SSD → GPU VRAM transfer benchmark (CUDA/cuFile)
 │   └── benchmark_hybrid_cache.py       # Automated Cold vs Warm TTFT evaluation
 │
 └── docs/
+    ├── tier3_local_nvme_ssd_guide.md   # Local SSD KV cache and transfer-path caveats
     ├── kv_cache_offloading_architecture_guide.md # Deep-dive KV offload & PagedAttention guide
     ├── kv_cache_offload_simulator.html # Interactive 3-Tier KV cache simulator
     ├── vllm_cloud_benchmark_guide.md   # Deep-dive engineering guide
