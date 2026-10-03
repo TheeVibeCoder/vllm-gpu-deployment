@@ -79,43 +79,105 @@ sequenceDiagram
 
 ## 3. End-to-End System Architecture & Data Flow
 
-Here is how data flows from your team's API call down to the physical silicon on Modal:
+Here is the **Enlarged Full-Scale Architectural Blueprint** showing every sub-system, buffer, socket, queue, and GPU hardware register from incoming HTTP packet to silicon execution:
 
 ```mermaid
 flowchart TD
-    subgraph Layer1["1. Network Edge & TLS Ingress"]
-        Client["Teammates / curl / Agent Harness"]
-        Edge["Modal TLS Edge Proxy (Port 443)"]
-        Client -->|"HTTPS POST /v1/chat/completions"| Edge
+    %% Global Styling
+    classDef edgeStyle fill:#1E293B,stroke:#38BDF8,stroke-width:2px,color:#F8FAFC;
+    classDef serverStyle fill:#0F172A,stroke:#34D399,stroke-width:2px,color:#F8FAFC;
+    classDef vllmCoreStyle fill:#18181B,stroke:#F59E0B,stroke-width:2px,color:#F8FAFC;
+    classDef gpuHwStyle fill:#3B0764,stroke:#C084FC,stroke-width:2px,color:#F8FAFC;
+    classDef memStyle fill:#064E3B,stroke:#10B981,stroke-width:2px,color:#F8FAFC;
+
+    subgraph INGRESS["1. NETWORK INGRESS & EDGE GATEWAY"]
+        ClientA["User 1 / Amp Harness<br/>(Client Session A)"]
+        ClientB["User 2 / Teammate<br/>(Client Session B)"]
+        EdgeProxy["Modal Global TLS Ingress Proxy<br/>Port 443 (SSL/TLS Termination)"]
+        ClientA -->|"HTTPS POST /v1/chat/completions"| EdgeProxy
+        ClientB -->|"HTTPS POST /v1/chat/completions"| EdgeProxy
     end
 
-    subgraph Layer2["2. HTTP & Tool Parsing Layer"]
-        FastAPI["Uvicorn + FastAPI (Port 8000)"]
-        Tokenizer["HuggingFace Fast Tokenizer"]
-        Hermes["Hermes Tool Call Parser"]
-        Edge -->|"Internal TCP Route"| FastAPI
-        FastAPI --> Tokenizer
-        Tokenizer --> Hermes
+    subgraph API_SERVER["2. HTTP RUNTIME & PARSER LAYER (FastAPI / Uvicorn Port 8000)"]
+        FastAPIEndpoint["FastAPI Async Request Handler"]
+        EdgeProxy -->|"Internal Loopback TCP (Port 8000)"| FastAPIEndpoint
+        
+        subgraph PROTOCOL_PIPELINE["Protocol & Tool Pipeline"]
+            HFTokenizer["HuggingFace Tokenizer<br/>(Raw Text -> Token IDs Vector)"]
+            HermesParser["Hermes 2 Pro Tool Call Parser<br/>(Extracts function arguments & JSON schema)"]
+            ChatTemplate["ChatML Template Formatter<br/>(&lt;|im_start|&gt;system / user / assistant)"]
+        end
+
+        FastAPIEndpoint --> ChatTemplate
+        ChatTemplate --> HFTokenizer
+        HFTokenizer --> HermesParser
     end
 
-    subgraph Layer3["3. vLLM Engine Core"]
-        Sched["Continuous Batching Scheduler (30ms cycle)"]
-        Radix["Radix Tree Prefix Cache (Block Allocator)"]
-        PagedVM["PagedAttention Virtual Page Table"]
-        Hermes --> Sched
-        Sched <--> Radix
-        Sched <--> PagedVM
+    subgraph ENGINE_CORE["3. vLLM CORE ENGINE & SCHEDULER"]
+        WaitingQueue["Waiting Request Queue<br/>(Incoming New Prefills)"]
+        RunningBatch["Running Batch Set<br/>(Active Token Generation)"]
+        
+        HermesParser --> WaitingQueue
+
+        subgraph SCHEDULER["Continuous Batching Engine (Iteration Step ~30ms)"]
+            StepScheduler["Iteration Scheduler<br/>(Evaluates Memory Watermark)"]
+            ChunkBudget["Chunked Prefill Slicer<br/>(Budget: 512 tokens/step)"]
+            TokenJoin["Dynamic Batch Join & Exit<br/>(EOS detection & slot release)"]
+        end
+
+        WaitingQueue --> StepScheduler
+        RunningBatch --> StepScheduler
+        StepScheduler --> ChunkBudget
+        StepScheduler --> TokenJoin
+
+        subgraph MEMORY_CONTROLLER["Virtual Memory Management"]
+            RadixTree["Radix Tree Prefix Index<br/>(Trie of Shared Token Sequences)"]
+            BlockTable["PagedAttention Block Table<br/>(Virtual Page -> Physical Block Pointers)"]
+            LRUEviction["LRU Eviction Pruner<br/>(Evicts ref_count=0 Leaf Nodes)"]
+        end
+
+        StepScheduler <--> RadixTree
+        StepScheduler <--> BlockTable
+        RadixTree <--> LRUEviction
     end
 
-    subgraph Layer4["4. Physical GPU Silicon (NVIDIA L4 24GB)"]
-        Marlin["Marlin INT8 Linear Kernel (8.29 GiB Weights)"]
-        Flash["FlashAttention-2 Tensor Kernel"]
-        VRAM["KV Cache Blocks (11.03 GiB / 206,480 Tokens)"]
-        PagedVM --> VRAM
-        Radix --> VRAM
-        Marlin --> Flash
-        VRAM --> Flash
+    subgraph GPU_HARDWARE["4. PHYSICAL GPU SILICON (NVIDIA L4 24GB VRAM)"]
+        subgraph STATIC_VRAM["Static VRAM Partition (8.29 GiB)"]
+            MarlinWeights["Quantized Model Weights (INT8)<br/>Qwen/Qwen2.5-7B-Instruct-GPTQ<br/>Loaded into VRAM in 1.45s"]
+        end
+
+        subgraph DYNAMIC_VRAM["Dynamic KV Cache Pool (11.03 GiB / 206,480 Tokens)"]
+            PrefixBlocks["Shared System & Tool Blocks<br/>(Blocks 0..7: Ref Count > 0)"]
+            User1Blocks["User 1 Active Context<br/>(Blocks 8..13: In VRAM Cache)"]
+            User2Blocks["User 2 Active Context<br/>(Blocks 14..19: In VRAM Cache)"]
+            FreePool["Free Unallocated Block Pool<br/>(Blocks 20..31: Available Headroom)"]
+        end
+
+        subgraph COMPUTE_CORES["Ada Lovelace Compute Execution (SMs & Tensor Cores)"]
+            FlashAttnKernel["FlashAttention-2 Kernel<br/>(Fused QK^T + Softmax in SRAM)"]
+            MarlinKernel["Marlin INT8 Linear Kernel<br/>(Dequantize-on-the-fly to FP16)"]
+            Sampler["Logits Processor & Greedy/Nucleus Sampler"]
+        end
+
+        BlockTable --> DYNAMIC_VRAM
+        MarlinWeights --> MarlinKernel
+        DYNAMIC_VRAM --> FlashAttnKernel
+        MarlinKernel --> FlashAttnKernel
+        FlashAttnKernel --> Sampler
     end
+
+    subgraph RESPONSE_STREAM["5. STREAMING RESPONSE OUTGRESS"]
+        EventStream["Server-Sent Events (SSE)<br/>data: {'choices': [{'delta': {'content': token}}]}"]
+        Sampler -->|"Next Token ID -> Text"| EventStream
+        EventStream -->|"HTTP Chunked Transfer Stream"| ClientA
+        EventStream -->|"HTTP Chunked Transfer Stream"| ClientB
+    end
+
+    class ClientA,ClientB,EdgeProxy edgeStyle;
+    class FastAPIEndpoint,HFTokenizer,HermesParser,ChatTemplate serverStyle;
+    class StepScheduler,ChunkBudget,TokenJoin,RadixTree,BlockTable,LRUEviction vllmCoreStyle;
+    class MarlinWeights,FlashAttnKernel,MarlinKernel,Sampler gpuHwStyle;
+    class PrefixBlocks,User1Blocks,User2Blocks,FreePool memStyle;
 ```
 
 ---
