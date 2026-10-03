@@ -13,6 +13,7 @@ This comprehensive master guide documents everything accomplished, architected, 
 6. [Multi-Tier Memory Hierarchy: Tier 1 vs Tier 2 vs Tier 3](#6-multi-tier-memory-hierarchy-tier-1-vs-tier-2-vs-tier-3)
 7. [The Interactive GPU Architecture Simulator](#7-the-interactive-gpu-architecture-simulator)
 8. [Codebase & Script Manifest](#8-codebase--script-manifest)
+9. [How to Quantize Models: A Complete Practical Guide (AWQ, GPTQ, FP8)](#9-how-to-quantize-models-a-complete-practical-guide-awq-gptq-fp8)
 
 ---
 
@@ -280,3 +281,160 @@ The following production scripts have been created and maintained in your deploy
 * **Features:**
   * Zero-dependency Tailwind CSS + Vanilla JS interactive application.
   * Can be opened directly in any web browser to explain vLLM internals to engineering teams.
+
+---
+
+## 9. How to Quantize Models: A Complete Practical Guide (AWQ, GPTQ, FP8)
+
+Quantization compresses 16-bit floating point weights ($\text{FP16}$ / $\text{BF16}$, 2 bytes per parameter) down to 8 bits (1 byte) or 4 bits (0.5 bytes).
+
+### 🎯 Why We Quantize for vLLM:
+* A 7B model in FP16 takes **14.3 GiB** of VRAM just to store weights. On a 24GB GPU, that leaves only **5 GiB for KV Cache**.
+* In 8-bit (GPTQ/AWQ), weights shrink to **8.29 GiB**, leaving **11.03 GiB for KV Cache** (over **206,480 tokens**).
+* In 4-bit (AWQ/GPTQ), weights shrink to **4.5 GiB**, leaving **15+ GiB for KV Cache** (over **350,000 tokens**).
+
+---
+
+### 🔬 The 3 Dominant Post-Training Quantization (PTQ) Techniques
+
+| Quantization Method | Target Bitwidth | Hardware Acceleration Kernel | Best For | Calibration Required? |
+| :--- | :---: | :---: | :--- | :---: |
+| **AWQ (Activation-aware Weight Quantization)** | 4-bit (W4A16) | AWQ / Marlin Tensor Cores | **High-throughput serving** (protects top 1% salient weights from degradation). | Yes (~128-512 sample texts) |
+| **GPTQ (Generalized Post-Training Quantization)** | 4-bit / 8-bit | Marlin Linear Kernel | **General LLM serving** with optimal Second-Order Error minimization. | Yes (~128-512 sample texts) |
+| **FP8 (Floating Point 8 - E4M3 / E5M2)** | 8-bit (W8A8) | Native Hopper (H100) / Ada (L4) FP8 Tensor Cores | **Fastest execution on Ada/Hopper**; quantizes both weights AND activations. | Optional (dynamic or static scale) |
+
+---
+
+### 🛠️ Practical Implementation: How to Quantize a Model Yourself
+
+You don't need to retrain a model from scratch. You run **Post-Training Quantization (PTQ)** using standard Python libraries:
+
+#### Method A: Quantizing to 4-Bit with AutoAWQ
+AutoAWQ protects salient weights by observing activation magnitudes over a small calibration dataset.
+
+```bash
+pip install autoawq transformers accelerate
+```
+
+```python
+from awq import AutoAWQForCausalLM
+from transformers import AutoTokenizer
+
+model_path = "Qwen/Qwen2.5-7B-Instruct"
+quant_path = "Qwen2.5-7B-Instruct-AWQ-4bit"
+
+quant_config = {
+    "zero_point": True,
+    "q_group_size": 128,  # Group every 128 weights together
+    "w_bit": 4,           # 4-bit weights
+    "version": "GEMM"     # High-performance matrix multiplication
+}
+
+# 1. Load the original FP16 model
+model = AutoAWQForCausalLM.from_pretrained(model_path, **{"low_cpu_mem_usage": True})
+tokenizer = AutoTokenizer.from_pretrained(model_path, trust_remote_code=True)
+
+# 2. Quantize using calibration text (e.g. Pileval or WikiText)
+print("Quantizing weights with AutoAWQ...")
+model.quantize(tokenizer, quant_config=quant_config)
+
+# 3. Save the quantized model & tokenizer
+model.save_quantized(quant_path)
+tokenizer.save_pretrained(quant_path)
+print(f"Quantized 4-bit model saved to {quant_path}!")
+```
+
+#### Method B: Quantizing to 8-Bit or 4-Bit with AutoGPTQ
+GPTQ uses the inverse Hessian matrix to round weights while mathematically canceling out rounding errors across adjacent channels.
+
+```bash
+pip install auto-gptq optimum transformers
+```
+
+```python
+from transformers import AutoTokenizer
+from auto_gptq import AutoGPTQForCausalLM, BaseQuantizeConfig
+
+model_path = "Qwen/Qwen2.5-7B-Instruct"
+quant_path = "Qwen2.5-7B-Instruct-GPTQ-Int8"
+
+# Configure 8-bit quantization
+quantize_config = BaseQuantizeConfig(
+    bits=8,               # 8-bit integer weights
+    group_size=128,       # Group size for scaling factors
+    desc_act=False,       # Enables fast Marlin kernel compatibility
+)
+
+tokenizer = AutoTokenizer.from_pretrained(model_path, use_fast=True)
+examples = [
+    tokenizer("vLLM is a high-throughput, memory-efficient LLM serving engine."),
+    tokenizer("PagedAttention treats GPU memory like virtual memory pages."),
+    tokenizer("Continuous batching schedules requests at the iteration level.")
+]
+
+# Quantize and save
+model = AutoGPTQForCausalLM.from_pretrained(model_path, quantize_config)
+model.quantize(examples)
+model.save_quantized(quant_path)
+tokenizer.save_pretrained(quant_path)
+```
+
+#### Method C: Quantizing with Neural Magic `llm-compressor` (Modern vLLM Standard)
+vLLM's official partner **Neural Magic** created `llm-compressor` to quantize models directly into formats that vLLM loads natively (including INT4, INT8, and FP8):
+
+```bash
+pip install llmcompressor
+```
+
+```python
+from llmcompressor.transformers import SparseAutoModelForCausalLM
+from llmcompressor.transformers import oneshot
+from transformers import AutoTokenizer
+
+model_id = "Qwen/Qwen2.5-7B-Instruct"
+save_dir = "Qwen2.5-7B-FP8"
+
+# 1. Define FP8 Quantization Recipe
+recipe = """
+quant_stage:
+  quant_modifiers:
+    QuantizationModifier:
+      ignore: ["lm_head"]
+      config_groups:
+        group_0:
+          weights: {num_bits: 8, type: float, strategy: channel, dynamic: false}
+          input_activations: {num_bits: 8, type: float, strategy: token, dynamic: false}
+"""
+
+# 2. Run one-shot calibration and export
+oneshot(
+    model=model_id,
+    dataset="ultrachat-200k",
+    recipe=recipe,
+    output_dir=save_dir,
+    max_seq_length=2048,
+    num_calibration_samples=512,
+)
+```
+
+---
+
+### 🚀 How to Serve Any Quantized Model in vLLM
+
+Once a model is quantized (or downloaded from Hugging Face), you don't need any complex flags. vLLM auto-detects the quantization type from the model's `config.json`:
+
+```bash
+# Serving an AWQ 4-bit model:
+vllm serve Qwen/Qwen2.5-7B-Instruct-AWQ --quantization awq
+
+# Serving a GPTQ 8-bit or 4-bit model (our current setup):
+vllm serve Qwen/Qwen2.5-7B-Instruct-GPTQ-Int8 --quantization gptq
+
+# Serving an FP8 model on NVIDIA L4 / H100:
+vllm serve neuralmagic/Qwen2.5-7B-Instruct-FP8 --quantization fp8
+```
+
+vLLM automatically selects the fastest available CUDA kernel for your GPU:
+* On NVIDIA L4 (Compute 8.9), it compiles **`MarlinLinearKernel`** for INT8/INT4 and **`CutlassFP8`** for FP8.
+* Weight loading drops from 30+ seconds to **under 1.5 seconds**, and memory bandwidth bottlenecks during token generation are cut in half!
+
